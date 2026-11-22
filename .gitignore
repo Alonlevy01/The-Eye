@@ -1,0 +1,29 @@
+# Secrets & environment
+.env
+.env.*
+!.env.example
+
+# Media recordings & generated outputs (never commit videos or large outputs)
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.wav
+*.mp3
+*.m4a
+downloads/
+output/
+media_samples/
+
+# Python & caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
