@@ -1,4 +1,4 @@
-"""Vision-Language Model (VLM) tactical coach supporting local Ollama and OpenRouter."""
+"""Vision-Language Model (VLM) CS2 tactical coach using 3-frame pre-duel filmstrips."""
 
 from __future__ import annotations
 
@@ -12,39 +12,40 @@ import cv2
 import httpx
 
 from the_eye.config import Settings
-from the_eye.schemas import ClipSummary, DetectedEvent, format_timestamp
+from the_eye.schemas import ClipSummary, DetectedEvent, MechanicsScorecard, format_timestamp
 
-VLM_SYSTEM_PROMPT = """You are a Counter-Strike 2 (CS2) tactical VOD coach reviewing POV frames.
-Each image comes from a timestamp detected by our OpenCV + audio pipeline (killfeed,
-flashbang, sniper scope, or combat burst).
+VLM_SYSTEM_PROMPT = """You are a high-Elo Counter-Strike 2 (CS2) mechanics coach reviewing 3-frame
+pre-duel filmstrips (1. APPROACH -1.5s | 2. CONTACT -0.5s | 3. OUTCOME 0.0s) paired with measured
+CS2 mechanics (crosshair discipline, counter-strafing, sound reaction time, trade timing).
 
 Return STRICT JSON ONLY (no markdown fences, no extra prose):
 {
   "event_observations": {
-    "E1": "1 sentence on what is visible (weapon, position, crosshair/utility) & detection.",
+    "E1": "1-2 sentences on observable mechanics (crosshair, peek, counter-strafe, cover).",
     "E2": "..."
   },
-  "tactical_summary": "3-4 concise sentences on what a CS2 player can learn from this clip."
+  "tactical_summary": "3-4 actionable CS2 takeaways citing event IDs (E1, E2) & drills."
 }
 
-RULES:
-1. Only describe details visible in the frames (never hallucinate unseen kills or maps).
-2. If an image is heavily flashed or unclear, say so honestly.
-3. Keep every observation grounded and actionable for CS2 players."""
+STRICT RULES:
+1. DO NOT guess or invent map callout names unless you can literally read the callout text
+   printed under the top-left radar. Focus purely on mechanics and geometry.
+2. Never narrate obvious filler ('player holds gun'). Diagnose WHY the duel went well or poorly.
+3. If a frame is unclear or flashed, state that honestly."""
 
 
-def encode_image_base64_jpeg(image_path: Path, *, max_width: int = 768) -> str:
-    """Resize and JPEG-encode a keyframe to keep VLM token usage compact and fast."""
+def encode_image_base64_jpeg(image_path: Path, *, max_width: int = 960) -> str:
+    """Resize and JPEG-encode a filmstrip/keyframe for compact VLM vision inference."""
     img = cv2.imread(str(image_path))
     if img is None:
-        raise FileNotFoundError(f"Could not read keyframe image: {image_path}")
+        raise FileNotFoundError(f"Could not read image: {image_path}")
     h, w = img.shape[:2]
     if w > max_width:
         scale = max_width / float(w)
         img = cv2.resize(img, (max_width, max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     if not ok:
-        raise RuntimeError(f"Failed to JPEG-encode keyframe: {image_path}")
+        raise RuntimeError(f"Failed to JPEG-encode image: {image_path}")
     b64 = base64.b64encode(buf.tobytes()).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
 
@@ -67,23 +68,44 @@ def build_vlm_messages(
     title: str,
     summary: ClipSummary,
     events: list[DetectedEvent],
-    max_frames: int = 4,
+    mechanics: MechanicsScorecard | None = None,
+    max_frames: int = 3,
 ) -> list[dict[str, Any]]:
-    """Build OpenAI-compatible multimodal chat messages containing top keyframe images."""
-    chosen = [e for e in events if e.keyframe_path and Path(e.keyframe_path).exists()][:max_frames]
+    """Build multimodal messages preferring 3-frame pre-duel filmstrips over single frames."""
+    chosen: list[tuple[DetectedEvent, Path]] = []
+    for e in events:
+        if len(chosen) >= max_frames:
+            break
+        if e.filmstrip_path and Path(e.filmstrip_path).exists():
+            chosen.append((e, Path(e.filmstrip_path)))
+        elif e.keyframe_path and Path(e.keyframe_path).exists():
+            chosen.append((e, Path(e.keyframe_path)))
 
     meta_lines = [
         f"Recording: {title}",
         (
             f"Clip stats: duration={summary.analyzed_duration_sec:.1f}s, "
             f"events={summary.total_events} ({summary.engagements_per_min:.1f}/min), "
-            f"killfeed={summary.killfeed_events}, flashes={summary.flash_count} "
-            f"({summary.flashed_seconds:.1f}s blind), scoped={summary.scoped_seconds:.1f}s "
-            f"({summary.scoped_ratio * 100:.1f}%), audio_spikes={summary.audio_spike_count}."
+            f"killfeed={summary.killfeed_events}, damage={summary.damage_events}, "
+            f"flashes={summary.flash_count} ({summary.flashed_seconds:.1f}s blind), "
+            f"scoped={summary.scoped_seconds:.1f}s ({summary.scoped_ratio * 100:.1f}%)."
         ),
-        "Selected keyframes to inspect:",
     ]
-    for e in chosen:
+    if mechanics is not None:
+        rx_ms = mechanics.avg_reaction_time_ms
+        rx_str = f"{rx_ms:.0f}ms" if rx_ms else "n/a"
+        meta_lines.append(
+            f"Measured CS2 Mechanics: overall={mechanics.overall_mechanics_score:.1f}/100, "
+            f"crosshair_discipline={mechanics.crosshair_discipline_score:.1f}/100 "
+            f"(v_jitter={mechanics.avg_vertical_jitter:.2f}), "
+            f"counter_strafe={mechanics.counter_strafe_score:.1f}/100, "
+            f"sound_awareness={mechanics.sound_awareness_score:.1f}/100 (avg_rx={rx_str}), "
+            f"trade_windows={mechanics.trade_window_count}, "
+            f"utility_entry_combos={mechanics.utility_entry_combos}."
+        )
+
+    meta_lines.append("Selected pre-duel sequences to diagnose:")
+    for e, _ in chosen:
         meta_lines.append(
             f"- {e.event_id} [{e.event_type.value}] at clip {format_timestamp(e.timestamp_sec)} "
             f"(orig {format_timestamp(e.original_video_sec)}): "
@@ -91,10 +113,9 @@ def build_vlm_messages(
         )
 
     user_parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(meta_lines)}]
-    for e in chosen:
-        assert e.keyframe_path is not None
-        data_uri = encode_image_base64_jpeg(Path(e.keyframe_path))
-        user_parts.append({"type": "text", "text": f"Keyframe for {e.event_id}:"})
+    for e, img_path in chosen:
+        data_uri = encode_image_base64_jpeg(img_path)
+        user_parts.append({"type": "text", "text": f"3-frame pre-duel sequence for {e.event_id}:"})
         user_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
 
     return [
@@ -108,23 +129,24 @@ def run_vlm_coaching(
     title: str,
     summary: ClipSummary,
     events: list[DetectedEvent],
+    mechanics: MechanicsScorecard | None = None,
     settings: Settings | None = None,
     model_override: str | None = None,
-    max_frames: int = 4,
+    max_frames: int = 3,
 ) -> tuple[dict[str, str], str, str]:
-    """Run VLM visual coaching via Ollama (`ollama:<model>`) or OpenRouter."""
+    """Run VLM tactical coaching via Ollama (`ollama:<model>`) or OpenRouter."""
     cfg = settings or Settings()
     model_spec = (model_override or cfg.vlm_model).strip()
     messages = build_vlm_messages(
         title=title,
         summary=summary,
         events=events,
+        mechanics=mechanics,
         max_frames=max_frames,
     )
 
     if model_spec.startswith("ollama:"):
         actual_model = model_spec.removeprefix("ollama:").strip()
-        # Use Ollama native /api/chat with think=false so Qwen3.5 vision returns clean JSON fast
         ollama_root = cfg.ollama_base_url.rstrip("/")
         if ollama_root.endswith("/v1"):
             ollama_root = ollama_root[:-3]

@@ -19,12 +19,19 @@ flowchart LR
     Report --> Compare["the-eye compare<br/>(Side-by-Side HTML + Rich Table)"]
 ```
 
-### What It Detects On Screen & In Audio
-- **Killfeed Events (`killfeed_event`):** Monitors CS2's top-right Killfeed ROI (`x: 0.74..0.99`, `y: 0.04..0.28` — offset past the spectator top-bar player cards) for vivid crimson player-highlight borders (`HSV S >= 165, V >= 150` to avoid Mirage/Dust2 sandstone false positives) and sharp pixel deltas.
-- **Flashbang Whiteouts (`flashbang`):** High full-frame luminance (`V >= 215`) combined with low saturation (`S <= 45`) to separate true flashbang blinds from bright sky/sand areas.
-- **Sniper Scope Vignette (`scoped_duel`):** Four dark outer screen corners (`mean < 22`) paired with a bright center reticle region (`mean > 35`) for AWP/SSG08/AUG zoom windows.
-- **Visual + Audio Combat Bursts (`combat_burst`):** Fuses center-crosshair motion spikes with `librosa` RMS loudness and onset bursts (gunfire, utility explosions, headshots).
-- **Annotated Evidence & VLM Coaching:** Draws color-coded HUD ROI overlays and exact `MM:SS.s` clip + original video timestamps onto keyframe PNGs, then optionally sends top keyframes to a Vision-Language Model for actionable CS2 tactical coaching.
+### What It Measures & Coaches
+- **CS2 Mechanics Scorecard (0–100, Zero-LLM Deterministic CV + Audio):**
+  - **Crosshair Discipline (`vision.py` / `mechanics.py`):** Uses **OpenCV Farneback Dense Optical Flow** on the center viewport to measure horizontal pre-aim stability vs. vertical bounce (`vertical_jitter`).
+  - **Counter-Strafe & Shot Coordination:** Measures camera velocity right before and during every gunfire audio spike to score stabilized counter-strafed shots vs. run-and-gun movement.
+  - **Sound-Cue Awareness & Reaction Time (ms):** Measures the latency (`ms`) between audio cues (footsteps, utility, enemy shots) and directional aim-flick responses.
+  - **Team & Utility Coordination:** Detects kill-trade windows (`<= 4.0s` between killfeed events), flash-to-entry combos (`<= 4.0s`), and top-left **Radar ROI** rotation activity.
+  - **Targeted Practice Drills:** Generates concrete CS2 practice recommendations directly from the player's lowest-scoring mechanics.
+- **On-Screen HUD & Combat Event Detection:**
+  - **Killfeed Events (`killfeed_event`):** Top-right Killfeed ROI (`x: 0.74..0.99`, `y: 0.04..0.28`) with vivid crimson HSV filtering (`S >= 165, V >= 150`) to avoid Mirage/Dust2 sandstone false positives.
+  - **Damage Taken (`damage_taken`):** Detects CS2's directional red damage arc around the mid-screen ring.
+  - **Flashbang Whiteouts (`flashbang`):** High luminance (`V >= 215`) + low saturation (`S <= 45`).
+  - **Sniper Scope Vignette (`scoped_duel`):** Four dark outer screen corners (`mean < 22`) + bright center reticle (`mean > 35`).
+- **3-Frame Pre-Duel Filmstrips & VLM Coaching:** Stitches `1. APPROACH (-1.5s) | 2. CONTACT (-0.5s) | 3. OUTCOME (0.0s)` strips for every major duel and sends them with the Mechanics Scorecard to local **Ollama (`qwen3.5:9b`)** or **OpenRouter** to diagnose *why* duels were won or lost.
 
 ---
 

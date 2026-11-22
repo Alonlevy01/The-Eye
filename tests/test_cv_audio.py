@@ -41,7 +41,7 @@ def _make_killfeed_frame() -> np.ndarray:
 
 
 def test_opencv_cs2_detectors_identify_flash_scope_and_killfeed() -> None:
-    normal_m, _, _ = analyze_single_frame(
+    normal_m, *_ = analyze_single_frame(
         _make_normal_frame(1),
         frame_index=0,
         timestamp_sec=0.0,
@@ -51,7 +51,7 @@ def test_opencv_cs2_detectors_identify_flash_scope_and_killfeed() -> None:
     assert normal_m.is_scoped is False
     assert normal_m.killfeed_red_ratio < 0.005
 
-    flash_m, _, _ = analyze_single_frame(
+    flash_m, *_ = analyze_single_frame(
         _make_flashbang_frame(),
         frame_index=1,
         timestamp_sec=0.5,
@@ -61,7 +61,7 @@ def test_opencv_cs2_detectors_identify_flash_scope_and_killfeed() -> None:
     assert flash_m.is_scoped is False
     assert flash_m.brightness >= 240.0
 
-    scope_m, _, _ = analyze_single_frame(
+    scope_m, *_ = analyze_single_frame(
         _make_scoped_awp_frame(),
         frame_index=2,
         timestamp_sec=1.0,
@@ -70,7 +70,7 @@ def test_opencv_cs2_detectors_identify_flash_scope_and_killfeed() -> None:
     assert scope_m.is_scoped is True
     assert scope_m.is_flashed is False
 
-    kf_m, _, _ = analyze_single_frame(
+    kf_m, *_ = analyze_single_frame(
         _make_killfeed_frame(),
         frame_index=3,
         timestamp_sec=1.5,
@@ -99,15 +99,19 @@ def test_audio_fusion_and_annotated_keyframe_export(tmp_path: Path) -> None:
     sampled: list[SampledFrame] = []
     prev_c = None
     prev_kf = None
+    prev_r = None
+    prev_f = None
     for idx, bgr in enumerate(frames_bgr):
         ts = idx * 0.5
-        m, prev_c, prev_kf = analyze_single_frame(
+        m, prev_c, prev_kf, prev_r, prev_f = analyze_single_frame(
             bgr,
             frame_index=idx,
             timestamp_sec=ts,
             original_video_sec=30.0 + ts,
             prev_center_gray=prev_c,
             prev_killfeed_gray=prev_kf,
+            prev_radar_gray=prev_r,
+            prev_flow_gray=prev_f,
         )
         sampled.append(SampledFrame(metrics=m, bgr=bgr))
 
@@ -127,7 +131,8 @@ def test_audio_fusion_and_annotated_keyframe_export(tmp_path: Path) -> None:
     assert enriched[6].audio_spike is True  # t=3.0s gunfire burst detected!
 
     kf_dir = tmp_path / "keyframes"
-    events, summary = detect_fused_events(sampled, fps=2.0, keyframes_dir=kf_dir)
+    events, summary, mechanics = detect_fused_events(sampled, fps=2.0, keyframes_dir=kf_dir)
+    assert 0.0 <= mechanics.overall_mechanics_score <= 100.0
 
     event_types = {e.event_type for e in events}
     assert EventType.FLASHBANG in event_types

@@ -1,4 +1,4 @@
-"""Typer + Rich CLI for The-Eye CS2 gameplay analyzer."""
+"""Typer + Rich CLI for The-Eye CS2 gameplay mechanics & coaching analyzer."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from the_eye.vlm import run_vlm_coaching
 app = typer.Typer(
     name="the-eye",
     help=(
-        "The-Eye: CS2 gameplay visual & audio analyzer. "
+        "The-Eye: CS2 gameplay visual, audio & mechanics coaching analyzer. "
         "Accepts local video files (.mp4/.mkv/.webm/.mov/.avi) or YouTube URLs."
     ),
     no_args_is_help=True,
@@ -58,8 +58,8 @@ def analyze(
     ] = 40.0,
     fps: Annotated[
         float,
-        typer.Option("--fps", help="Frame sampling rate for OpenCV analysis."),
-    ] = 2.0,
+        typer.Option("--fps", help="Frame sampling rate (default 4.0 fps = 250ms resolution)."),
+    ] = 4.0,
     out_dir: Annotated[
         Path | None,
         typer.Option("--out", "-o", help="Output folder for report.json, report.html & keyframes."),
@@ -73,7 +73,7 @@ def analyze(
         typer.Option("--no-vlm", help="Skip VLM coaching and run pure OpenCV + librosa analysis."),
     ] = False,
 ) -> None:
-    """Analyze a CS2 gameplay video (local file or YouTube URL) and build visual reports."""
+    """Analyze a CS2 gameplay video (local file or YouTube URL) and build coaching reports."""
     target_dir = out_dir or (Path("output") / _slugify(title))
     target_dir.mkdir(parents=True, exist_ok=True)
     keyframes_dir = target_dir / "keyframes"
@@ -89,7 +89,9 @@ def analyze(
                 duration_sec=duration,
             )
 
-        with console.status(f"Running OpenCV CS2 HUD & screen analysis @ {fps:.1f} fps..."):
+        with console.status(
+            f"Running OpenCV CS2 HUD, radar, damage & optical-flow analysis @ {fps:.1f} fps..."
+        ):
             sampled = sample_video_frames(
                 media.clip_path,
                 fps=fps,
@@ -105,8 +107,10 @@ def analyze(
             for sf_item, new_m in zip(sampled, enriched, strict=True):
                 sf_item.metrics = new_m
 
-        with console.status("Fusing visual + audio events & exporting annotated keyframes..."):
-            events, summary = detect_fused_events(
+        with console.status(
+            "Fusing events, computing CS2 Mechanics Scorecard & stitching 3-frame filmstrips..."
+        ):
+            events, summary, mechanics = detect_fused_events(
                 sampled,
                 fps=fps,
                 keyframes_dir=keyframes_dir,
@@ -117,12 +121,13 @@ def analyze(
     if not no_vlm and events:
         cfg = Settings()
         chosen_model = model or cfg.vlm_model
-        with console.status(f"Running VLM tactical coaching ({chosen_model})..."):
+        with console.status(f"Running VLM pre-duel diagnosis ({chosen_model})..."):
             try:
                 obs_map, vlm_summary, vlm_model_used = run_vlm_coaching(
                     title=title,
                     summary=summary,
                     events=events,
+                    mechanics=mechanics,
                     settings=cfg,
                     model_override=model,
                 )
@@ -140,6 +145,7 @@ def analyze(
         excerpt_duration_sec=duration,
         fps=fps,
         summary=summary,
+        mechanics=mechanics,
         events=events,
         timeline=[sf.metrics for sf in sampled],
         vlm_model=vlm_model_used,
@@ -151,7 +157,42 @@ def analyze(
     json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     write_html_report(report, html_path)
 
-    # Print crisp Rich summary table
+    # Print CS2 Mechanics Scorecard
+    mc_table = Table(title=f"CS2 Mechanics Scorecard — {title}")
+    mc_table.add_column("Mechanic", style="bold")
+    mc_table.add_column("Score", style="bold cyan")
+    mc_table.add_column("Measured Signal")
+    rx_str = f"{mechanics.avg_reaction_time_ms:.0f} ms" if mechanics.avg_reaction_time_ms else "n/a"
+    mc_table.add_row(
+        "Overall CS2 Mechanics",
+        f"{mechanics.overall_mechanics_score:.1f}/100",
+        "Weighted composite score",
+    )
+    mc_table.add_row(
+        "Crosshair Discipline",
+        f"{mechanics.crosshair_discipline_score:.1f}/100",
+        f"Avg vertical jitter = {mechanics.avg_vertical_jitter:.2f} (lower is steadier)",
+    )
+    mc_table.add_row(
+        "Counter-Strafe Coord.",
+        f"{mechanics.counter_strafe_score:.1f}/100",
+        f"{mechanics.coordinated_shot_ratio * 100:.0f}% shots fired while stabilized",
+    )
+    mc_table.add_row(
+        "Sound-Cue Awareness",
+        f"{mechanics.sound_awareness_score:.1f}/100",
+        f"Avg audio-to-aim reaction = {rx_str}",
+    )
+    mc_table.add_row(
+        "Team & Utility Timing",
+        f"{mechanics.team_coordination_score:.1f}/100",
+        f"Trades (<=4s): {mechanics.trade_window_count} | "
+        f"Flash-entry combos: {mechanics.utility_entry_combos} | "
+        f"Radar rot: {mechanics.radar_rotation_activity:.1f}",
+    )
+    console.print(mc_table)
+
+    # Print detected events
     table = Table(title=f"Detected Events — {title}")
     table.add_column("ID", style="bold cyan")
     table.add_column("Type", style="bold")
@@ -171,7 +212,7 @@ def analyze(
     console.print(table)
     console.print(
         f"[green]Saved:[/] {json_path}  |  [bold green]{html_path}[/]  "
-        f"|  Keyframes: {keyframes_dir}"
+        f"|  Keyframes & Filmstrips: {keyframes_dir}"
     )
 
 
@@ -188,30 +229,43 @@ def compare(
     ra = AnalysisReport.model_validate(json.loads(report_a.read_text(encoding="utf-8")))
     rb = AnalysisReport.model_validate(json.loads(report_b.read_text(encoding="utf-8")))
     sa, sb = ra.summary, rb.summary
+    ma, mb = ra.mechanics, rb.mechanics
+    rx_a = f"{ma.avg_reaction_time_ms:.0f}ms" if ma.avg_reaction_time_ms else "n/a"
+    rx_b = f"{mb.avg_reaction_time_ms:.0f}ms" if mb.avg_reaction_time_ms else "n/a"
 
-    table = Table(title="The-Eye · Side-by-Side CS2 Comparison")
-    table.add_column("Metric", style="bold")
+    table = Table(title="The-Eye · Side-by-Side CS2 Mechanics Comparison")
+    table.add_column("CS2 Metric", style="bold")
     table.add_column(ra.title, style="cyan")
     table.add_column(rb.title, style="magenta")
     table.add_row(
-        "Duration (s)", f"{sa.analyzed_duration_sec:.1f}", f"{sb.analyzed_duration_sec:.1f}"
+        "Overall Mechanics",
+        f"{ma.overall_mechanics_score:.1f}/100",
+        f"{mb.overall_mechanics_score:.1f}/100",
     )
-    table.add_row("Total Events", str(sa.total_events), str(sb.total_events))
+    table.add_row(
+        "Crosshair Discipline",
+        f"{ma.crosshair_discipline_score:.1f} (vJit={ma.avg_vertical_jitter:.2f})",
+        f"{mb.crosshair_discipline_score:.1f} (vJit={mb.avg_vertical_jitter:.2f})",
+    )
+    table.add_row(
+        "Counter-Strafe Coord.",
+        f"{ma.counter_strafe_score:.1f} ({ma.coordinated_shot_ratio * 100:.0f}%)",
+        f"{mb.counter_strafe_score:.1f} ({mb.coordinated_shot_ratio * 100:.0f}%)",
+    )
+    table.add_row(
+        "Sound Awareness (Rx)",
+        f"{ma.sound_awareness_score:.1f} ({rx_a})",
+        f"{mb.sound_awareness_score:.1f} ({rx_b})",
+    )
+    table.add_row(
+        "Team & Utility Timing",
+        f"{ma.team_coordination_score:.1f} (trades={ma.trade_window_count})",
+        f"{mb.team_coordination_score:.1f} (trades={mb.trade_window_count})",
+    )
     table.add_row("Events / Min", f"{sa.engagements_per_min:.2f}", f"{sb.engagements_per_min:.2f}")
     table.add_row("Killfeed Events", str(sa.killfeed_events), str(sb.killfeed_events))
-    table.add_row(
-        "Flashbangs (Blind s)",
-        f"{sa.flash_count} ({sa.flashed_seconds:.1f}s)",
-        f"{sb.flash_count} ({sb.flashed_seconds:.1f}s)",
-    )
-    table.add_row(
-        "Scoped Time (%)",
-        f"{sa.scoped_seconds:.1f}s ({sa.scoped_ratio * 100:.1f}%)",
-        f"{sb.scoped_seconds:.1f}s ({sb.scoped_ratio * 100:.1f}%)",
-    )
-    table.add_row("Combat Bursts", str(sa.combat_bursts), str(sb.combat_bursts))
+    table.add_row("Damage Flashes", str(sa.damage_events), str(sb.damage_events))
     table.add_row("Audio Spikes", str(sa.audio_spike_count), str(sb.audio_spike_count))
-    table.add_row("Avg Center Motion", f"{sa.avg_center_motion:.2f}", f"{sb.avg_center_motion:.2f}")
 
     console.print(table)
     write_comparison_html(ra, rb, out)
