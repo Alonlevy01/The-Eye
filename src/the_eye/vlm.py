@@ -1,4 +1,4 @@
-"""Vision-Language Model (VLM) CS2 tactical coach using 3-frame pre-duel filmstrips."""
+"""Vision-Language Model (VLM) Rocket League coach reviewing 3-frame moment filmstrips."""
 
 from __future__ import annotations
 
@@ -12,26 +12,26 @@ import cv2
 import httpx
 
 from the_eye.config import Settings
-from the_eye.schemas import ClipSummary, DetectedEvent, MechanicsScorecard, format_timestamp
+from the_eye.schemas import BoostScorecard, ClipSummary, DetectedEvent, format_timestamp
 
-VLM_SYSTEM_PROMPT = """You are a high-Elo Counter-Strike 2 (CS2) mechanics coach reviewing 3-frame
-pre-duel filmstrips (1. APPROACH -1.5s | 2. CONTACT -0.5s | 3. OUTCOME 0.0s) paired with measured
-CS2 mechanics (crosshair discipline, counter-strafing, sound reaction time, trade timing).
+VLM_SYSTEM_PROMPT = """You are a Supersonic Legend (SSL) Rocket League coach reviewing 3-frame
+moment filmstrips (1. BEFORE -1.5s | 2. MOMENT 0.0s | 3. AFTER +1.0s) paired with exact
+on-screen Boost Gauge readings (0-100).
 
 Return STRICT JSON ONLY (no markdown fences, no extra prose):
 {
   "event_observations": {
-    "E1": "1-2 sentences on observable mechanics (crosshair, peek, counter-strafe, cover).",
+    "E1": "1-2 concise sentences explaining what happened with boost, positioning, or rotation.",
     "E2": "..."
   },
-  "tactical_summary": "3-4 actionable CS2 takeaways citing event IDs (E1, E2) & drills."
+  "tactical_summary": "3-4 actionable Rocket League coaching takeaways grounded in the boost stats."
 }
 
-STRICT RULES:
-1. DO NOT guess or invent map callout names unless you can literally read the callout text
-   printed under the top-left radar. Focus purely on mechanics and geometry.
-2. Never narrate obvious filler ('player holds gun'). Diagnose WHY the duel went well or poorly.
-3. If a frame is unclear or flashed, state that honestly."""
+RULES:
+1. Reference ONLY what is visibly happening in the frames and the measured boost numbers.
+2. Focus on actionable Rocket League habits (small-pad pathing, back-post rotation, supersonic
+   preservation, avoiding panic boost burns).
+3. Keep every observation honest and concise."""
 
 
 def encode_image_base64_jpeg(image_path: Path, *, max_width: int = 960) -> str:
@@ -68,10 +68,10 @@ def build_vlm_messages(
     title: str,
     summary: ClipSummary,
     events: list[DetectedEvent],
-    mechanics: MechanicsScorecard | None = None,
+    scorecard: BoostScorecard | None = None,
     max_frames: int = 3,
 ) -> list[dict[str, Any]]:
-    """Build multimodal messages preferring 3-frame pre-duel filmstrips over single frames."""
+    """Build multimodal messages preferring 3-frame moment filmstrips over single frames."""
     chosen: list[tuple[DetectedEvent, Path]] = []
     for e in events:
         if len(chosen) >= max_frames:
@@ -83,39 +83,29 @@ def build_vlm_messages(
 
     meta_lines = [
         f"Recording: {title}",
-        (
-            f"Clip stats: duration={summary.analyzed_duration_sec:.1f}s, "
-            f"events={summary.total_events} ({summary.engagements_per_min:.1f}/min), "
-            f"killfeed={summary.killfeed_events}, damage={summary.damage_events}, "
-            f"flashes={summary.flash_count} ({summary.flashed_seconds:.1f}s blind), "
-            f"scoped={summary.scoped_seconds:.1f}s ({summary.scoped_ratio * 100:.1f}%)."
-        ),
+        f"Clip stats: duration={summary.analyzed_duration_sec:.1f}s, "
+        f"events={summary.total_events}.",
     ]
-    if mechanics is not None:
-        rx_ms = mechanics.avg_reaction_time_ms
-        rx_str = f"{rx_ms:.0f}ms" if rx_ms else "n/a"
+    if scorecard is not None:
         meta_lines.append(
-            f"Measured CS2 Mechanics: overall={mechanics.overall_mechanics_score:.1f}/100, "
-            f"crosshair_discipline={mechanics.crosshair_discipline_score:.1f}/100 "
-            f"(v_jitter={mechanics.avg_vertical_jitter:.2f}), "
-            f"counter_strafe={mechanics.counter_strafe_score:.1f}/100, "
-            f"sound_awareness={mechanics.sound_awareness_score:.1f}/100 (avg_rx={rx_str}), "
-            f"trade_windows={mechanics.trade_window_count}, "
-            f"utility_entry_combos={mechanics.utility_entry_combos}."
+            f"Measured Boost Stats: score={scorecard.overall_boost_score:.1f}/100, "
+            f"avg_boost={scorecard.avg_boost:.1f}, starved={scorecard.starved_pct:.1f}% "
+            f"({scorecard.starved_seconds:.1f}s), over_capped={scorecard.over_capped_pct:.1f}%, "
+            f"big_pads={scorecard.big_pad_pickups}, small_pads={scorecard.small_pad_pickups}, "
+            f"panic_burnouts={scorecard.panic_burnouts}."
         )
 
-    meta_lines.append("Selected pre-duel sequences to diagnose:")
+    meta_lines.append("Selected moments to diagnose:")
     for e, _ in chosen:
         meta_lines.append(
             f"- {e.event_id} [{e.event_type.value}] at clip {format_timestamp(e.timestamp_sec)} "
-            f"(orig {format_timestamp(e.original_video_sec)}): "
-            f"{e.visual_evidence} {e.audio_evidence}"
+            f"(boost={e.boost_at_event:.0f}): {e.visual_evidence}"
         )
 
     user_parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(meta_lines)}]
     for e, img_path in chosen:
         data_uri = encode_image_base64_jpeg(img_path)
-        user_parts.append({"type": "text", "text": f"3-frame pre-duel sequence for {e.event_id}:"})
+        user_parts.append({"type": "text", "text": f"3-frame sequence for {e.event_id}:"})
         user_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
 
     return [
@@ -129,19 +119,19 @@ def run_vlm_coaching(
     title: str,
     summary: ClipSummary,
     events: list[DetectedEvent],
-    mechanics: MechanicsScorecard | None = None,
+    scorecard: BoostScorecard | None = None,
     settings: Settings | None = None,
     model_override: str | None = None,
     max_frames: int = 3,
 ) -> tuple[dict[str, str], str, str]:
-    """Run VLM tactical coaching via Ollama (`ollama:<model>`) or OpenRouter."""
+    """Run VLM Rocket League coaching via Ollama (`ollama:<model>`) or OpenRouter."""
     cfg = settings or Settings()
     model_spec = (model_override or cfg.vlm_model).strip()
     messages = build_vlm_messages(
         title=title,
         summary=summary,
         events=events,
-        mechanics=mechanics,
+        scorecard=scorecard,
         max_frames=max_frames,
     )
 

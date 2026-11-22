@@ -1,9 +1,10 @@
-"""Typer + Rich CLI for The-Eye CS2 gameplay mechanics & coaching analyzer."""
+"""Typer + Rich CLI for The-Eye Rocket League Boost & Gameplay Analyzer."""
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -25,7 +26,7 @@ from the_eye.vlm import run_vlm_coaching
 app = typer.Typer(
     name="the-eye",
     help=(
-        "The-Eye: CS2 gameplay visual, audio & mechanics coaching analyzer. "
+        "The-Eye: Rocket League Boost Discipline & Gameplay Analyzer. "
         "Accepts local video files (.mp4/.mkv/.webm/.mov/.avi) or YouTube URLs."
     ),
     no_args_is_help=True,
@@ -35,7 +36,7 @@ console = Console()
 
 def _slugify(text: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", text.strip()).strip("_").lower()
-    return cleaned or "cs2_run"
+    return cleaned or "rl_run"
 
 
 @app.command()
@@ -46,8 +47,8 @@ def analyze(
     ],
     title: Annotated[
         str,
-        typer.Option("--title", "-t", help="Readable title for this recording."),
-    ] = "CS2 Gameplay Excerpt",
+        typer.Option("--title", "-t", help="Readable title for this Rocket League recording."),
+    ] = "Rocket League Gameplay",
     start: Annotated[
         float,
         typer.Option("--start", "-s", help="Start timestamp in seconds within the source video."),
@@ -55,38 +56,30 @@ def analyze(
     duration: Annotated[
         float,
         typer.Option("--duration", "-d", help="Excerpt duration in seconds to analyze."),
-    ] = 40.0,
+    ] = 90.0,
     fps: Annotated[
         float,
-        typer.Option("--fps", help="Frame sampling rate (default 4.0 fps = 250ms resolution)."),
-    ] = 4.0,
+        typer.Option("--fps", help="Frame sampling rate (default 5.0 fps = 200ms resolution)."),
+    ] = 5.0,
     out_dir: Annotated[
         Path | None,
-        typer.Option("--out", "-o", help="Output folder for report.json, report.html & keyframes."),
+        typer.Option("--out", "-o", help="Output folder for report.json, report.html & clip.mp4."),
     ] = None,
     model: Annotated[
         str | None,
         typer.Option("--model", "-m", help="Override VLM model (e.g. ollama:qwen3.5:9b)."),
     ] = None,
-    weapon: Annotated[
-        str,
-        typer.Option(
-            "--weapon",
-            "-w",
-            help="Primary weapon recoil profile: auto, ak47, m4a4, m4a1s, galil, mp9, awp, deagle.",
-        ),
-    ] = "auto",
     no_vlm: Annotated[
         bool,
         typer.Option("--no-vlm", help="Skip VLM coaching and run pure OpenCV + librosa analysis."),
     ] = False,
 ) -> None:
-    """Analyze a CS2 gameplay video (local file or YouTube URL) and build coaching reports."""
+    """Analyze a Rocket League video (local file or YouTube URL) and build coaching reports."""
     target_dir = out_dir or (Path("output") / _slugify(title))
     target_dir.mkdir(parents=True, exist_ok=True)
     keyframes_dir = target_dir / "keyframes"
 
-    console.print(Panel.fit(f"[bold cyan]The-Eye[/] analyzing: [bold]{title}[/]"))
+    console.print(Panel.fit(f"[bold orange1]The-Eye[/] analyzing: [bold]{title}[/]"))
 
     with tempfile.TemporaryDirectory(prefix="the-eye-") as tmpdir:
         with console.status("Preparing video & extracting 16 kHz audio via FFmpeg..."):
@@ -97,16 +90,14 @@ def analyze(
                 duration_sec=duration,
             )
 
-        with console.status(
-            f"Running OpenCV CS2 HUD, radar, damage & optical-flow analysis @ {fps:.1f} fps..."
-        ):
+        with console.status(f"Reading Rocket League Boost Gauge (0-100) @ {fps:.1f} fps..."):
             sampled = sample_video_frames(
                 media.clip_path,
                 fps=fps,
                 excerpt_start_sec=start,
             )
 
-        with console.status("Extracting librosa audio combat cues..."):
+        with console.status("Extracting librosa audio cues..."):
             enriched = analyze_audio_cues(
                 media.audio_path,
                 [sf.metrics for sf in sampled],
@@ -115,23 +106,16 @@ def analyze(
             for sf_item, new_m in zip(sampled, enriched, strict=True):
                 sf_item.metrics = new_m
 
-        with console.status(
-            "Fusing events, computing CS2 Mechanics Scorecard & stitching 3-frame filmstrips..."
-        ):
-            events, summary, mechanics = detect_fused_events(
+        with console.status("Computing Boost Scorecard & exporting annotated filmstrips..."):
+            events, summary, scorecard = detect_fused_events(
                 sampled,
                 fps=fps,
                 keyframes_dir=keyframes_dir,
-                weapon=weapon,
             )
-        # Always save cut clip.mp4 alongside report.html so HTML5 <video> plays offline
-        # with frame-accurate seeking and zero YouTube file:/// embed Error 153.
+
         local_clip_rel: str | None = None
         if media.clip_path.exists():
-            import shutil
-
-            saved_clip = target_dir / "clip.mp4"
-            shutil.copy2(media.clip_path, saved_clip)
+            shutil.copy2(media.clip_path, target_dir / "clip.mp4")
             local_clip_rel = "clip.mp4"
 
     vlm_model_used: str | None = None
@@ -139,13 +123,13 @@ def analyze(
     if not no_vlm and events:
         cfg = Settings()
         chosen_model = model or cfg.vlm_model
-        with console.status(f"Running VLM pre-duel diagnosis ({chosen_model})..."):
+        with console.status(f"Running VLM coaching ({chosen_model})..."):
             try:
                 obs_map, vlm_summary, vlm_model_used = run_vlm_coaching(
                     title=title,
                     summary=summary,
                     events=events,
-                    mechanics=mechanics,
+                    scorecard=scorecard,
                     settings=cfg,
                     model_override=model,
                 )
@@ -163,7 +147,7 @@ def analyze(
         excerpt_duration_sec=duration,
         fps=fps,
         summary=summary,
-        mechanics=mechanics,
+        scorecard=scorecard,
         events=events,
         timeline=[sf.metrics for sf in sampled],
         vlm_model=vlm_model_used,
@@ -176,69 +160,45 @@ def analyze(
     json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     write_html_report(report, html_path)
 
-    # Print CS2 Mechanics Scorecard
-    mc_table = Table(title=f"CS2 Mechanics Scorecard — {title}")
-    mc_table.add_column("Mechanic", style="bold")
-    mc_table.add_column("Score", style="bold cyan")
-    mc_table.add_column("Measured Signal")
-    rx_str = f"{mechanics.avg_reaction_time_ms:.0f} ms" if mechanics.avg_reaction_time_ms else "n/a"
-    mc_table.add_row(
-        "Overall CS2 Mechanics",
-        f"{mechanics.overall_mechanics_score:.1f}/100",
-        "Weighted composite score",
+    sc_table = Table(title=f"Rocket League Boost Scorecard — {title}")
+    sc_table.add_column("Metric", style="bold")
+    sc_table.add_column("Value", style="bold orange1")
+    rec_s = f"{scorecard.avg_recovery_sec:.1f}s" if scorecard.avg_recovery_sec else "n/a"
+    sc_table.add_row("Overall Boost Score", f"{scorecard.overall_boost_score:.1f} / 100")
+    sc_table.add_row("Average Boost Held", f"{scorecard.avg_boost:.1f} / 100")
+    sc_table.add_row("Boost Spent / Min (BPM)", f"{scorecard.boost_spent_per_min:.0f} BPM")
+    sc_table.add_row(
+        "Boost-Starved (<=12)",
+        f"{scorecard.starved_pct:.1f}% ({scorecard.starved_seconds:.1f}s)",
     )
-    mc_table.add_row(
-        "Crosshair Discipline",
-        f"{mechanics.crosshair_discipline_score:.1f}/100",
-        f"Avg vertical jitter = {mechanics.avg_vertical_jitter:.2f} (lower is steadier)",
+    sc_table.add_row(
+        "Over-Capped (>=96)",
+        f"{scorecard.over_capped_pct:.1f}% ({scorecard.over_capped_seconds:.1f}s)",
     )
-    mc_table.add_row(
-        "Active Counter-Strafe",
-        f"{mechanics.counter_strafe_score:.1f}/100",
-        f"Active={mechanics.active_counter_strafe_count} | "
-        f"Static={mechanics.stationary_shot_count} | Moving={mechanics.moving_shot_count}",
+    sc_table.add_row(
+        "Small Pads / Big Pads",
+        f"{scorecard.small_pad_pickups} small | {scorecard.big_pad_pickups} big",
     )
-    mc_table.add_row(
-        "Spray Control",
-        f"{mechanics.spray_control_score:.1f}/100",
-        f"Measured across {mechanics.spray_burst_count} sustained gunfire bursts",
-    )
-    mc_table.add_row(
-        "Sound & Flank Aware.",
-        f"{mechanics.sound_awareness_score:.1f}/100",
-        f"Avg reaction = {rx_str} | Flank misses = {mechanics.flank_awareness_misses}",
-    )
-    mc_table.add_row(
-        "Team & Utility Timing",
-        f"{mechanics.team_coordination_score:.1f}/100",
-        f"Trades (<=4s): {mechanics.trade_window_count} | "
-        f"Flash-entry combos: {mechanics.utility_entry_combos} | "
-        f"Radar rot: {mechanics.radar_rotation_activity:.1f}",
-    )
-    console.print(mc_table)
+    sc_table.add_row("Panic Burnouts", str(scorecard.panic_burnouts))
+    sc_table.add_row("Avg Starved Recovery", rec_s)
+    console.print(sc_table)
 
-    # Print detected events
-    table = Table(title=f"Detected Events — {title}")
-    table.add_column("ID", style="bold cyan")
-    table.add_column("Type", style="bold")
-    table.add_column("Clip Time")
-    table.add_column("Orig Video")
-    table.add_column("Conf")
-    table.add_column("Visual Evidence")
+    ev_table = Table(title=f"Detected Boost & Gameplay Events ({len(events)})")
+    ev_table.add_column("ID", style="bold cyan")
+    ev_table.add_column("Type", style="bold")
+    ev_table.add_column("Clip Time")
+    ev_table.add_column("Boost")
+    ev_table.add_column("Visual Evidence")
     for e in events:
-        table.add_row(
+        ev_table.add_row(
             e.event_id,
             e.event_type.value,
             format_timestamp(e.timestamp_sec),
-            format_timestamp(e.original_video_sec),
-            f"{e.confidence:.2f}",
+            f"{e.boost_at_event:.0f}",
             e.visual_evidence,
         )
-    console.print(table)
-    console.print(
-        f"[green]Saved:[/] {json_path}  |  [bold green]{html_path}[/]  "
-        f"|  Keyframes & Filmstrips: {keyframes_dir}"
-    )
+    console.print(ev_table)
+    console.print(f"[green]Saved:[/] {json_path}  |  [bold green]{html_path}[/]")
 
 
 @app.command()
@@ -248,58 +208,41 @@ def compare(
     out: Annotated[
         Path,
         typer.Option("--out", "-o", help="Output path for side-by-side compare.html."),
-    ] = Path("output/compare.html"),
+    ] = Path("output/compare_rl.html"),
 ) -> None:
-    """Compare two analyzed CS2 gameplay recordings side-by-side."""
+    """Compare two analyzed Rocket League gameplay recordings side-by-side."""
     ra = AnalysisReport.model_validate(json.loads(report_a.read_text(encoding="utf-8")))
     rb = AnalysisReport.model_validate(json.loads(report_b.read_text(encoding="utf-8")))
-    sa, sb = ra.summary, rb.summary
-    ma, mb = ra.mechanics, rb.mechanics
-    rx_a = f"{ma.avg_reaction_time_ms:.0f}ms" if ma.avg_reaction_time_ms else "n/a"
-    rx_b = f"{mb.avg_reaction_time_ms:.0f}ms" if mb.avg_reaction_time_ms else "n/a"
+    sa, sb = ra.scorecard, rb.scorecard
 
-    table = Table(title="The-Eye · Side-by-Side CS2 Mechanics Comparison")
-    table.add_column("CS2 Metric", style="bold")
+    table = Table(title="The-Eye · Rocket League Side-by-Side Comparison")
+    table.add_column("Metric", style="bold")
     table.add_column(ra.title, style="cyan")
-    table.add_column(rb.title, style="magenta")
+    table.add_column(rb.title, style="orange1")
     table.add_row(
-        "Overall Mechanics",
-        f"{ma.overall_mechanics_score:.1f}/100",
-        f"{mb.overall_mechanics_score:.1f}/100",
+        "Overall Boost Score",
+        f"{sa.overall_boost_score:.1f}/100",
+        f"{sb.overall_boost_score:.1f}/100",
+    )
+    table.add_row("Average Boost Held", f"{sa.avg_boost:.1f}", f"{sb.avg_boost:.1f}")
+    table.add_row(
+        "Boost-Starved (<=12)",
+        f"{sa.starved_pct:.1f}% ({sa.starved_seconds:.1f}s)",
+        f"{sb.starved_pct:.1f}% ({sb.starved_seconds:.1f}s)",
     )
     table.add_row(
-        "Crosshair Discipline",
-        f"{ma.crosshair_discipline_score:.1f} (vJit={ma.avg_vertical_jitter:.2f})",
-        f"{mb.crosshair_discipline_score:.1f} (vJit={mb.avg_vertical_jitter:.2f})",
+        "Over-Capped (>=96)",
+        f"{sa.over_capped_pct:.1f}% ({sa.over_capped_seconds:.1f}s)",
+        f"{sb.over_capped_pct:.1f}% ({sb.over_capped_seconds:.1f}s)",
     )
     table.add_row(
-        "Active Counter-Strafe",
-        f"{ma.counter_strafe_score:.1f} "
-        f"({ma.active_counter_strafe_count}/{ma.stationary_shot_count}/{ma.moving_shot_count})",
-        f"{mb.counter_strafe_score:.1f} "
-        f"({mb.active_counter_strafe_count}/{mb.stationary_shot_count}/{mb.moving_shot_count})",
+        "Small / Big Pads",
+        f"{sa.small_pad_pickups} / {sa.big_pad_pickups}",
+        f"{sb.small_pad_pickups} / {sb.big_pad_pickups}",
     )
-    table.add_row(
-        "Spray Control",
-        f"{ma.spray_control_score:.1f} ({ma.spray_burst_count} sprays)",
-        f"{mb.spray_control_score:.1f} ({mb.spray_burst_count} sprays)",
-    )
-    table.add_row(
-        "Sound Awareness (Rx)",
-        f"{ma.sound_awareness_score:.1f} ({rx_a})",
-        f"{mb.sound_awareness_score:.1f} ({rx_b})",
-    )
-    table.add_row(
-        "Team & Utility Timing",
-        f"{ma.team_coordination_score:.1f} (trades={ma.trade_window_count})",
-        f"{mb.team_coordination_score:.1f} (trades={mb.trade_window_count})",
-    )
-    table.add_row("Events / Min", f"{sa.engagements_per_min:.2f}", f"{sb.engagements_per_min:.2f}")
-    table.add_row("Killfeed Events", str(sa.killfeed_events), str(sb.killfeed_events))
-    table.add_row("Damage Flashes", str(sa.damage_events), str(sb.damage_events))
-    table.add_row("Audio Spikes", str(sa.audio_spike_count), str(sb.audio_spike_count))
-
+    table.add_row("Panic Burnouts", str(sa.panic_burnouts), str(sb.panic_burnouts))
     console.print(table)
+
     write_comparison_html(ra, rb, out)
     console.print(f"[bold green]Saved comparison report:[/] {out}")
 

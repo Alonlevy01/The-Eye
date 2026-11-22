@@ -1,6 +1,6 @@
 # The-Eye
 
-Counter-Strike 2 (CS2) gameplay visual & audio analyzer that processes recorded POV footage (local files or YouTube URLs) using **FFmpeg**, **OpenCV**, **librosa**, and optional **Vision-Language Models (local Ollama `qwen3.5:9b` or OpenRouter)** to detect key engagements, killfeed events, flashbangs, and scoped duels—and compare two recordings side-by-side.
+Rocket League **Boost Discipline & Gameplay Analyzer** that processes recorded POV footage (local files or YouTube URLs) using **FFmpeg**, **OpenCV**, **librosa**, and optional **Vision-Language Models (local Ollama `qwen3.5:9b` or OpenRouter)** to read the on-screen **0–100 Boost Gauge** directly from pixels, pinpoint boost starvation and panic burnouts, and compare two recordings side-by-side.
 
 ---
 
@@ -9,38 +9,37 @@ Counter-Strike 2 (CS2) gameplay visual & audio analyzer that processes recorded 
 ```mermaid
 flowchart LR
     Input["Local Video (.mp4/.mkv/.webm)<br/>or YouTube URL"] --> Ingest["ingest.py<br/>(yt-dlp + FFmpeg)"]
-    Ingest -->|"Cut MP4 Clip"| CV["vision.py<br/>(OpenCV CS2 HUD & Screen ROIs)"]
-    Ingest -->|"16 kHz Mono WAV"| Audio["audio.py<br/>(librosa RMS & Onset Spikes)"]
-    CV --> Fuse["events.py<br/>(Visual + Audio Fusion)"]
+    Ingest -->|"Cut MP4 Clip"| CV["vision.py<br/>(OpenCV Polar 0-100 Boost Gauge Scanner)"]
+    Ingest -->|"16 kHz Mono WAV"| Audio["audio.py<br/>(librosa Goal & Impact Audio Peaks)"]
+    CV --> Fuse["events.py + mechanics.py<br/>(Boost Scorecard & Mistake Grouping)"]
     Audio --> Fuse
-    Fuse -->|"Annotated Keyframe PNGs"| VLM["vlm.py<br/>(Ollama qwen3.5:9b / OpenRouter)"]
-    Fuse --> Report["report.py<br/>(Standalone HTML + SVG Timeline)"]
+    Fuse -->|"3-Frame Filmstrips"| VLM["vlm.py<br/>(Optional Ollama qwen3.5:9b / OpenRouter)"]
+    Fuse --> Report["report.py<br/>(Offline HTML5 Video + Boost Graph)"]
     VLM --> Report
-    Report --> Compare["the-eye compare<br/>(Side-by-Side HTML + Rich Table)"]
+    Report --> Compare["the-eye compare<br/>(SSL vs Gold Side-by-Side)"]
 ```
 
-### What It Measures & Coaches
-- **CS2 Mechanics Scorecard (0–100, Zero-LLM Deterministic CV + Audio):**
-  - **Crosshair Discipline (`vision.py` / `mechanics.py`):** Uses **OpenCV Farneback Dense Optical Flow** on the center viewport to measure horizontal pre-aim stability vs. vertical bounce (`vertical_jitter`).
-  - **Counter-Strafe & Shot Coordination:** Measures camera velocity right before and during every gunfire audio spike to score stabilized counter-strafed shots vs. run-and-gun movement.
-  - **Sound-Cue Awareness & Reaction Time (ms):** Measures the latency (`ms`) between audio cues (footsteps, utility, enemy shots) and directional aim-flick responses.
-  - **Team & Utility Coordination:** Detects kill-trade windows (`<= 4.0s` between killfeed events), flash-to-entry combos (`<= 4.0s`), and top-left **Radar ROI** rotation activity.
-  - **Targeted Practice Drills:** Generates concrete CS2 practice recommendations directly from the player's lowest-scoring mechanics.
-- **On-Screen HUD & Combat Event Detection:**
-  - **Killfeed Events (`killfeed_event`):** Top-right Killfeed ROI (`x: 0.74..0.99`, `y: 0.04..0.28`) with vivid crimson HSV filtering (`S >= 165, V >= 150`) to avoid Mirage/Dust2 sandstone false positives.
-  - **Damage Taken (`damage_taken`):** Detects CS2's directional red damage arc around the mid-screen ring.
-  - **Flashbang Whiteouts (`flashbang`):** High luminance (`V >= 215`) + low saturation (`S <= 45`).
-  - **Sniper Scope Vignette (`scoped_duel`):** Four dark outer screen corners (`mean < 22`) + bright center reticle (`mean > 35`).
-- **3-Frame Pre-Duel Filmstrips & VLM Coaching:** Stitches `1. APPROACH (-1.5s) | 2. CONTACT (-0.5s) | 3. OUTCOME (0.0s)` strips for every major duel and sends them with the Mechanics Scorecard to local **Ollama (`qwen3.5:9b`)** or **OpenRouter** to diagnose *why* duels were won or lost.
+### What It Measures Directly From On-Screen Pixels
+- **0–100 Boost Gauge Polar Scanner (`vision.py`):** Scans 100 angular bins along Rocket League's locked bottom-right circular Boost Gauge (`102° → 306°`, `204°` sweep) in HSV space — **±2 boost accuracy** with zero OCR or ML, while automatically detecting and excluding goal replays (`hud_visible=False`).
+- **Boost Discipline Scorecard (`mechanics.py`):**
+  - **Average Boost Held** (`0–100`)
+  - **% Time Boost-Starved (`<= 12` boost)** & total seconds starved
+  - **% Time Over-Capped (`>= 96` boost)** & passive stretches
+  - **Small-Pad (`+12`) vs. Big-Pad (`+100`) Pickups**
+  - **Panic Burnouts** (burning `>= 55` boost straight down to `<= 12` in `<= 3.5s`)
+  - **Average Recovery Time** (seconds from `<= 15` back to `>= 35` boost)
+- **Player-First Interactive HTML Report (`report.py`):**
+  - Embedded offline **HTML5 `<video>` player** (`clip.mp4`) with 1-click **`▶ Jump MM:SS.s`** buttons on every mistake, event card, and Boost-Over-Time graph marker.
+  - **Player View (Simple) ↔ Coach View (Advanced)** toggle so players see their Boost Grade (`S/A/B/C/D`), Boost-Over-Time graph, and clickable mistakes without debug clutter.
+  - **3-Frame Moment Filmstrips (`BEFORE -1.5s | MOMENT 0.0s | AFTER +1.0s`)** showing the exact in-game boost gauge number for instant visual verification.
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- Python `3.12+` and [`uv`](https://docs.astral.sh/uv/)
-- `ffmpeg` available on `PATH`
-- Optional: [Ollama](https://ollama.com/) (`ollama pull qwen3.5:9b`) or an `OPENROUTER_API_KEY` in `.env` for VLM tactical coaching (or pass `--no-vlm` for pure OpenCV + `librosa`).
+- Python `3.12+`, [`uv`](https://docs.astral.sh/uv/), and `ffmpeg` on `PATH`
+- Optional: [Ollama](https://ollama.com/) (`ollama pull qwen3.5:9b`) or `OPENROUTER_API_KEY` in `.env` for VLM coaching (or pass `--no-vlm` for pure OpenCV + `librosa`).
 
 ### Install
 ```bash
@@ -48,49 +47,39 @@ uv sync --extra dev
 cp .env.example .env
 ```
 
-### Analyze a CS2 Video (YouTube URL or Local File)
-Supported local formats: `.mp4`, `.mkv`, `.webm`, `.mov`, `.avi` — or any public YouTube URL.
+### Analyze Two Rocket League Recordings & Compare Side-by-Side
+Supported inputs: local files (`.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`) or YouTube URLs.
 
 ```bash
-# Example 1: Pro Major CS2 POV (donk — Spirit vs MOUZ on Mirage)
-uv run the-eye analyze "https://www.youtube.com/watch?v=sZBzpFwhBNY" \
-  --title "Pro Major POV - donk Mirage" \
-  --start 120 --duration 35 --fps 2.0 \
+# 1. SSL 2v2 POV (2000+ MMR, 2-minute excerpt)
+uv run the-eye analyze "https://www.youtube.com/watch?v=5X77jb5DR6I" \
+  --title "SSL 2v2 POV (2000+ MMR)" \
+  --start 60 --duration 120 --fps 2.0 \
   --model "ollama:qwen3.5:9b" \
-  --out output/pro_major_mirage
+  --out output/rl_ssl_2v2
 
-# Example 2: Amateur / Premier CS2 POV (Mirage, No Commentary)
-uv run the-eye analyze "https://www.youtube.com/watch?v=ODPp5e-7vGo" \
-  --title "Premier POV - Mirage" \
-  --start 120 --duration 35 --fps 2.0 \
+# 2. Gold 3 POV (2-minute excerpt)
+uv run the-eye analyze "https://www.youtube.com/watch?v=0euux689wVY" \
+  --title "Gold 3 POV" \
+  --start 60 --duration 120 --fps 2.0 \
   --model "ollama:qwen3.5:9b" \
-  --out output/premier_mirage
+  --out output/rl_gold3
 
-# Pure CV + Audio mode (no VLM required)
-uv run the-eye analyze path/to/my_cs2_clip.mp4 --title "My Mirage Clip" --no-vlm
-```
-
-Each run writes:
-- `report.json` — structured metrics, timeline, and detected events
-- `report.html` — standalone interactive visual report (SVG timeline + embedded annotated keyframes + VLM coaching)
-- `keyframes/*.png` — annotated OpenCV frames showing the exact HUD regions used
-
-### Compare Two Recordings Side-by-Side
-```bash
+# 3. Side-by-side comparison
 uv run the-eye compare \
-  output/pro_major_mirage/report.json \
-  output/premier_mirage/report.json \
-  --out output/compare_mirage.html
+  output/rl_ssl_2v2/report.json \
+  output/rl_gold3/report.json \
+  --out output/compare_rl.html
 ```
 
 ---
 
-## Included Demo Catalog ([catalog/cs2_videos.json](catalog/cs2_videos.json))
+## Included Demo Catalog ([catalog/rl_videos.json](catalog/rl_videos.json))
 
-| Recording | Skill Tier | Map | Source URL | Excerpt Start | Duration |
-| :--- | :--- | :--- | :--- | :---: | :---: |
-| **Pro Major POV — donk (Spirit vs MOUZ)** | Pro Major | Mirage | `https://www.youtube.com/watch?v=sZBzpFwhBNY` | `02:00` (`120s`) | `35s` |
-| **Premier POV — Matchmaking Mirage** | Amateur / Premier | Mirage | `https://www.youtube.com/watch?v=ODPp5e-7vGo` | `02:00` (`120s`) | `35s` |
+| Recording | Rank Tier | Source URL | Excerpt Start | Duration |
+| :--- | :--- | :--- | :---: | :---: |
+| **SSL 2v2 POV (2000+ MMR)** | Supersonic Legend | `https://www.youtube.com/watch?v=5X77jb5DR6I` | `01:00` (`60s`) | `120s` |
+| **Gold 3 POV (No Commentary)** | Gold 3 | `https://www.youtube.com/watch?v=0euux689wVY` | `01:00` (`60s`) | `120s` |
 
 ---
 
