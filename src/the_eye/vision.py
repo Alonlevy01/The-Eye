@@ -11,7 +11,8 @@ import numpy as np
 from the_eye.schemas import FrameMetrics, format_timestamp
 
 # Normalized (x1, y1, x2, y2) HUD Regions of Interest for 16:9 CS2 POV recordings
-KILLFEED_ROI = (0.68, 0.04, 0.99, 0.28)
+# x1=0.74 clears the spectator top-bar player cards while keeping the entire killfeed inside.
+KILLFEED_ROI = (0.74, 0.04, 0.99, 0.28)
 CENTER_CROSSHAIR_ROI = (0.35, 0.35, 0.65, 0.65)
 CORNER_SIZE = 0.14
 

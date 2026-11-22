@@ -1,0 +1,27 @@
+{
+  "game": "Counter-Strike 2 (CS2)",
+  "map": "Mirage",
+  "comparison_goal": "Compare combat tempo, flashbang exposure, sniper scope usage, and tactical positioning between a Pro Major CS2 POV and an Amateur/Premier CS2 POV on the same map (Mirage).",
+  "recordings": [
+    {
+      "id": "pro-major-mirage",
+      "title": "Pro Major POV — donk (Spirit vs MOUZ, Mirage)",
+      "skill_tier": "Pro Major",
+      "youtube_url": "https://www.youtube.com/watch?v=sZBzpFwhBNY",
+      "excerpt_start_sec": 120,
+      "excerpt_duration_sec": 35,
+      "fps": 2.0,
+      "notes": "Official Major POV demo on Mirage (StarLadder Budapest Major 2025)."
+    },
+    {
+      "id": "premier-mirage",
+      "title": "Premier POV — Matchmaking Mirage (No Commentary)",
+      "skill_tier": "Amateur / Premier",
+      "youtube_url": "https://www.youtube.com/watch?v=ODPp5e-7vGo",
+      "excerpt_start_sec": 120,
+      "excerpt_duration_sec": 35,
+      "fps": 2.0,
+      "notes": "Clean Premier competitive POV gameplay on Mirage with no commentary."
+    }
+  ]
+}

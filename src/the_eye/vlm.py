@@ -124,8 +124,37 @@ def run_vlm_coaching(
 
     if model_spec.startswith("ollama:"):
         actual_model = model_spec.removeprefix("ollama:").strip()
-        base_url = cfg.ollama_base_url.rstrip("/")
-        headers = {"Content-Type": "application/json"}
+        # Use Ollama native /api/chat with think=false so Qwen3.5 vision returns clean JSON fast
+        ollama_root = cfg.ollama_base_url.rstrip("/")
+        if ollama_root.endswith("/v1"):
+            ollama_root = ollama_root[:-3]
+        native_images = [
+            p["image_url"]["url"].split(",", 1)[1]
+            for p in messages[1]["content"]
+            if p.get("type") == "image_url"
+        ]
+        native_text = "\n".join(
+            p["text"] for p in messages[1]["content"] if p.get("type") == "text"
+        )
+        ollama_payload = {
+            "model": actual_model,
+            "stream": False,
+            "think": False,
+            "format": "json",
+            "options": {"temperature": 0.2},
+            "messages": [
+                {"role": "system", "content": messages[0]["content"]},
+                {"role": "user", "content": native_text, "images": native_images},
+            ],
+        }
+        with httpx.Client(timeout=180.0) as client:
+            resp = client.post(f"{ollama_root}/api/chat", json=ollama_payload)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Ollama VLM returned HTTP {resp.status_code}.")
+            data = resp.json()
+            content = str((data.get("message") or {}).get("content") or "").strip()
+            if not content:
+                raise RuntimeError("Ollama VLM returned empty content.")
     else:
         actual_model = model_spec
         base_url = cfg.openrouter_base_url.rstrip("/")
@@ -141,22 +170,24 @@ def run_vlm_coaching(
             "HTTP-Referer": "https://github.com/Alonlevy01/The-Eye",
             "X-Title": "The-Eye",
         }
-
-    payload = {
-        "model": actual_model,
-        "temperature": 0.2,
-        "messages": messages,
-    }
-
-    with httpx.Client(timeout=180.0) as client:
-        resp = client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"VLM endpoint returned HTTP {resp.status_code}.")
-        data = resp.json()
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError("VLM endpoint returned no choices.")
-        content = str(choices[0].get("message", {}).get("content") or "")
+        payload: dict[str, Any] = {
+            "model": actual_model,
+            "temperature": 0.2,
+            "max_tokens": 1200,
+            "messages": messages,
+        }
+        with httpx.Client(timeout=180.0) as client:
+            resp = client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"VLM endpoint returned HTTP {resp.status_code}.")
+            data = resp.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("VLM endpoint returned no choices.")
+            msg = choices[0].get("message") or {}
+            content = str(msg.get("content") or msg.get("reasoning") or "").strip()
+            if not content:
+                raise RuntimeError("VLM returned empty content.")
 
     parsed = parse_vlm_json(content)
     raw_obs = parsed.get("event_observations") or {}
