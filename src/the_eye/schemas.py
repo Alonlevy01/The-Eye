@@ -1,4 +1,4 @@
-"""Pydantic v2 data contracts for Rocket League boost, gameplay events, and coaching reports."""
+"""Pydantic v2 data contracts for BTD6 HUD telemetry, build order, wiki checks, and reports."""
 
 from __future__ import annotations
 
@@ -8,41 +8,45 @@ from pydantic import BaseModel, Field
 
 
 class EventType(StrEnum):
-    """Visual/audio Rocket League gameplay events detected by The-Eye."""
+    """Visual/audio BTD6 gameplay events detected by The-Eye."""
 
-    BOOST_STARVED = "boost_starved"
-    PANIC_BURNOUT = "panic_burnout"
-    BIG_PAD_PICKUP = "big_pad_pickup"
-    OVER_CAPPED = "over_capped"
-    GOAL_EXPLOSION = "goal_explosion"
+    BLOON_LEAK = "bloon_leak"
+    TOWER_PURCHASE = "tower_purchase"
+    KILLER_ROUND = "killer_round"
+    CASH_HOARDING = "cash_hoarding"
+    DEFEAT_OR_END = "defeat_or_end"
 
 
 class FrameMetrics(BaseModel):
-    """Per-sample Rocket League visual + audio telemetry extracted from one frame."""
+    """Per-sample BTD6 HUD & map telemetry extracted from one video frame."""
 
     frame_index: int = Field(ge=0)
     timestamp_sec: float = Field(ge=0.0)
     original_video_sec: float = Field(ge=0.0)
-    hud_visible: bool = True
-    boost_pct: float = Field(default=0.0, ge=0.0, le=100.0)
-    boost_delta: float = 0.0
-    brightness: float = Field(default=0.0, ge=0.0, le=255.0)
-    saturation: float = Field(default=0.0, ge=0.0, le=255.0)
-    field_motion: float = Field(default=0.0, ge=0.0)
+    lives: int | None = None
+    cash: int | None = None
+    round_num: int | None = None
+    max_round: int | None = None
+    selected_tower: str | None = None
+    cash_delta: int = 0
+    lives_delta: int = 0
+    map_activity: float = Field(default=0.0, ge=0.0)
     audio_rms: float = Field(default=0.0, ge=0.0)
     audio_onset: float = Field(default=0.0, ge=0.0)
     audio_spike: bool = False
 
 
 class DetectedEvent(BaseModel):
-    """One timestamped Rocket League gameplay moment grounded in visual + audio signals."""
+    """One timestamped BTD6 economy, leak, or killer-round moment."""
 
     event_id: str
     event_type: EventType
     timestamp_sec: float = Field(ge=0.0)
     original_video_sec: float = Field(ge=0.0)
-    duration_sec: float = Field(default=0.5, ge=0.0)
-    boost_at_event: float = Field(default=0.0, ge=0.0, le=100.0)
+    round_num: int | None = None
+    cash_at_event: int | None = None
+    lives_at_event: int | None = None
+    tower_name: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     visual_evidence: str
     audio_evidence: str
@@ -52,35 +56,34 @@ class DetectedEvent(BaseModel):
 
 
 class MistakeItem(BaseModel):
-    """One grouped, timestamped Rocket League boost/positioning mistake with an actionable fix."""
+    """One grouped, timestamped BTD6 strategy/economy mistake with Bloons Wiki advice."""
 
     category: str
     severity: str = "medium"  # "high" | "medium" | "low"
     timestamp_sec: float = Field(ge=0.0)
     original_video_sec: float = Field(ge=0.0)
-    duration_sec: float = Field(default=0.0, ge=0.0)
+    round_num: int | None = None
     summary: str
     how_to_fix: str
 
 
-class BoostScorecard(BaseModel):
-    """100% visually ground-truth Rocket League boost discipline & pacing scorecard."""
+class BTD6Scorecard(BaseModel):
+    """100% HUD-verified BTD6 economy, build-order & wiki checkpoint scorecard."""
 
-    overall_boost_score: float = Field(default=0.0, ge=0.0, le=100.0)
-    avg_boost: float = Field(default=0.0, ge=0.0, le=100.0)
-    boost_spent_per_min: float = Field(default=0.0, ge=0.0)
-    starved_pct: float = Field(default=0.0, ge=0.0, le=100.0)
-    starved_seconds: float = Field(default=0.0, ge=0.0)
-    over_capped_pct: float = Field(default=0.0, ge=0.0, le=100.0)
-    over_capped_seconds: float = Field(default=0.0, ge=0.0)
-    big_pad_pickups: int = Field(default=0, ge=0)
-    small_pad_pickups: int = Field(default=0, ge=0)
-    small_pad_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
-    panic_burnouts: int = Field(default=0, ge=0)
-    avg_recovery_sec: float | None = None
-    goal_explosions: int = Field(default=0, ge=0)
-    avg_field_speed: float = Field(default=0.0, ge=0.0)
-    live_hud_seconds: float = Field(default=0.0, ge=0.0)
+    overall_strategy_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    game_mode: str = "Standard"
+    start_round: int | None = None
+    end_round: int | None = None
+    rounds_progressed: int = Field(default=0, ge=0)
+    lives_lost: int = Field(default=0, ge=0)
+    total_cash_spent: int = Field(default=0, ge=0)
+    total_cash_earned: int = Field(default=0, ge=0)
+    avg_unspent_cash: float = Field(default=0.0, ge=0.0)
+    peak_unspent_cash: int = Field(default=0, ge=0)
+    purchase_count: int = Field(default=0, ge=0)
+    has_eco_farming: bool = False
+    towers_observed: list[str] = Field(default_factory=list)
+    killer_rounds_seen: list[str] = Field(default_factory=list)
     mistakes: list[MistakeItem] = Field(default_factory=list)
     improvement_drills: list[str] = Field(default_factory=list)
 
@@ -90,14 +93,14 @@ class ClipSummary(BaseModel):
 
     analyzed_duration_sec: float = Field(ge=0.0)
     total_frames: int = Field(ge=0)
-    live_hud_frames: int = Field(ge=0)
+    ocr_valid_frames: int = Field(ge=0)
     total_events: int = Field(ge=0)
     audio_spike_count: int = Field(ge=0)
-    avg_field_motion: float = Field(ge=0.0)
+    avg_map_activity: float = Field(default=0.0, ge=0.0)
 
 
 class AnalysisReport(BaseModel):
-    """Complete saved analysis report for one Rocket League gameplay recording."""
+    """Complete saved analysis report for one BTD6 gameplay recording."""
 
     title: str
     source: str
@@ -106,12 +109,17 @@ class AnalysisReport(BaseModel):
     excerpt_duration_sec: float = Field(default=0.0, ge=0.0)
     fps: float = Field(default=2.0, gt=0.0)
     summary: ClipSummary
-    scorecard: BoostScorecard = Field(default_factory=BoostScorecard)
+    scorecard: BTD6Scorecard = Field(default_factory=BTD6Scorecard)
     events: list[DetectedEvent] = Field(default_factory=list)
     timeline: list[FrameMetrics] = Field(default_factory=list)
     vlm_model: str | None = None
     vlm_tactical_summary: str | None = None
     local_clip_path: str | None = None
+    embedding_backend: str | None = None
+    map_embedding: list[float] = Field(default_factory=list)
+    round_embeddings: dict[str, list[float]] = Field(default_factory=dict)
+    visual_matched_towers: int = 0
+    end_screen_detected: bool = False
 
 
 def format_timestamp(seconds: float) -> str:

@@ -25,3 +25,5 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1",
         alias="OPENROUTER_BASE_URL",
     )
+    gemini_api_key: SecretStr = Field(default=SecretStr(""), alias="GEMINI_API_KEY")
+    embed_backend: str = Field(default="auto", alias="THE_EYE_EMBED_BACKEND")

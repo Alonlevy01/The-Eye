@@ -1,0 +1,42 @@
+{
+  "game": "Bloons TD 6 (BTD6)",
+  "notes": "Public full-game BTD6 gameplay recordings covering both clean wins and real leaking/losing runs (analyzed from start to end with --duration 0).",
+  "videos": [
+    {
+      "id": "btd6_r63_loss",
+      "title": "Bloons TD 6 — Epic Loss On Round 63 (Full Game)",
+      "url": "https://www.youtube.com/watch?v=DgRRNP93XdU",
+      "start_sec": 0,
+      "duration_sec": 0,
+      "type": "loss_and_mistakes",
+      "notes": "Full playthrough ending in defeat on the notorious Round 63 Ceramic Rush."
+    },
+    {
+      "id": "btd6_deflation_leaks",
+      "title": "Bloons TD 6 — Deflation Near-Death Leaks (Full Game)",
+      "url": "https://www.youtube.com/watch?v=TovasR4hb64",
+      "start_sec": 0,
+      "duration_sec": 0,
+      "type": "leaks_and_mistakes",
+      "notes": "Short 6.5-minute full run with real Bloon leaks and near-defeat moments."
+    },
+    {
+      "id": "btd6_downstream_hard_full",
+      "title": "Downstream [Hard] — Full Game (R3-R80)",
+      "url": "https://www.youtube.com/watch?v=4-cT9n8QNAk",
+      "start_sec": 0,
+      "duration_sec": 0,
+      "type": "clean_win_eco",
+      "notes": "Full Round 3 to Round 80 Hard run on Downstream with Banana Farm eco."
+    },
+    {
+      "id": "btd6_downstream_chimps_full",
+      "title": "Downstream [CHIMPS] — Full Game (R6-R100)",
+      "url": "https://www.youtube.com/watch?v=nhcA10kWtkA",
+      "start_sec": 0,
+      "duration_sec": 0,
+      "type": "clean_win_chimps",
+      "notes": "Full Round 6 to Round 100 CHIMPS run on Downstream (1 life, no income/powers)."
+    }
+  ]
+}

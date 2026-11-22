@@ -1,4 +1,4 @@
-"""Rocket League boost discipline scorecard, grouped mistake detection, and 3-frame filmstrips."""
+"""BTD6 Economy, Build Order, Wiki Killer-Round Readiness & 3-Frame Filmstrip Builder."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from the_eye.btd6_wiki import KILLER_ROUNDS, TOWER_ROLES
 from the_eye.schemas import (
-    BoostScorecard,
+    BTD6Scorecard,
     DetectedEvent,
     EventType,
     FrameMetrics,
@@ -17,224 +18,189 @@ from the_eye.schemas import (
 )
 
 
-def compute_boost_scorecard(
+def compute_btd6_scorecard(
     timeline: list[FrameMetrics],
     events: list[DetectedEvent],
     *,
     fps: float = 2.0,
-) -> BoostScorecard:
-    """Compute 100% visually ground-truth Rocket League boost discipline metrics & mistake cards."""
-    live = [m for m in timeline if m.hud_visible]
-    if not live:
-        return BoostScorecard()
+) -> BTD6Scorecard:
+    """Compute HUD-verified BTD6 economy, leak, tower coverage, and wiki checkpoint scores."""
+    valid = [m for m in timeline if m.cash is not None or m.round_num is not None]
+    if not valid:
+        return BTD6Scorecard()
 
     step_sec = 1.0 / max(fps, 0.5)
-    boosts = np.array([m.boost_pct for m in live], dtype=np.float64)
-    avg_boost = round(float(np.mean(boosts)), 1)
-    live_sec = round(len(live) * step_sec, 1)
+    rounds = [m.round_num for m in valid if m.round_num is not None]
+    max_rounds = [m.max_round for m in valid if m.max_round is not None]
+    cashes = [m.cash for m in valid if m.cash is not None]
+    lives_list = [m.lives for m in valid if m.lives is not None]
 
-    starved_frames = [m for m in live if m.boost_pct <= 12.0]
-    over_capped_frames = [m for m in live if m.boost_pct >= 96.0]
-    starved_sec = round(len(starved_frames) * step_sec, 1)
-    over_capped_sec = round(len(over_capped_frames) * step_sec, 1)
-    starved_pct = round((len(starved_frames) / len(live)) * 100.0, 1)
-    over_capped_pct = round((len(over_capped_frames) / len(live)) * 100.0, 1)
+    start_round = rounds[0] if rounds else None
+    end_round = rounds[-1] if rounds else None
+    rounds_progressed = (
+        max(0, end_round - start_round + 1)
+        if start_round is not None and end_round is not None
+        else 0
+    )
 
-    # Count big-pad (+45..+100), small-pad (+8..+30), and total Boost Spent Per Minute (BPM)!
-    big_pads = 0
-    small_pads = 0
-    total_boost_spent = 0.0
-    last_pad_ts = -99.0
-    for prev, curr in zip(live, live[1:], strict=False):
-        if curr.timestamp_sec - prev.timestamp_sec > step_sec * 3.0:
-            continue  # skip across goal replay gaps
-        delta = curr.boost_pct - prev.boost_pct
-        if delta < -1.0:
-            total_boost_spent += abs(delta)
-        elif delta >= 45.0 and (curr.timestamp_sec - last_pad_ts) >= 0.8:
-            big_pads += 1
-            last_pad_ts = curr.timestamp_sec
-        elif 8.0 <= delta < 35.0 and (curr.timestamp_sec - last_pad_ts) >= 0.6:
-            small_pads += 1
-            last_pad_ts = curr.timestamp_sec
+    max_r = max_rounds[-1] if max_rounds else None
+    if max_r == 100 and lives_list and min(lives_list) == 1 and max(lives_list) == 1:
+        game_mode = "CHIMPS / Impoppable"
+    elif max_r == 80:
+        game_mode = "Hard (80 Rounds)"
+    elif max_r == 60:
+        game_mode = "Medium (60 Rounds)"
+    elif max_r == 40:
+        game_mode = "Easy (40 Rounds)"
+    else:
+        game_mode = "Standard"
 
-    bpm = round((total_boost_spent / max(live_sec, 1.0)) * 60.0, 1)
-    total_pads = big_pads + small_pads
-    small_pad_ratio = round(small_pads / total_pads, 2) if total_pads > 0 else 0.0
+    total_spent = sum(abs(m.cash_delta) for m in valid if m.cash_delta <= -100)
+    total_earned = sum(m.cash_delta for m in valid if m.cash_delta > 0)
+    lives_lost = sum(abs(m.lives_delta) for m in valid if m.lives_delta < 0)
+    avg_cash = round(float(np.mean(cashes)), 1) if cashes else 0.0
+    peak_cash = max(cashes) if cashes else 0
 
-    # Average recovery time from boost-starved (<= 15) back to playable (>= 35)
-    recovery_times: list[float] = []
-    starve_start: float | None = None
-    for m in live:
-        if m.boost_pct <= 15.0 and starve_start is None:
-            starve_start = m.timestamp_sec
-        elif m.boost_pct >= 35.0 and starve_start is not None:
-            dt = m.timestamp_sec - starve_start
-            if 0.5 <= dt <= 25.0:
-                recovery_times.append(dt)
-            starve_start = None
-    avg_recovery = round(float(np.mean(recovery_times)), 2) if recovery_times else None
+    towers_seen: list[str] = []
+    for m in valid:
+        if m.selected_tower and m.selected_tower not in towers_seen:
+            towers_seen.append(m.selected_tower)
 
-    # Build grouped, clickable MistakeItems from contiguous bad stretches & panic burnouts
+    has_eco = any("eco" in TOWER_ROLES.get(t, ()) for t in towers_seen)
+    purchase_events = [e for e in events if e.event_type == EventType.TOWER_PURCHASE]
+    leak_events = [e for e in events if e.event_type == EventType.BLOON_LEAK]
+
+    # Wiki killer rounds encountered in this clip
+    killer_seen: list[str] = []
+    seen_r_set = sorted(set(rounds))
+    for r in seen_r_set:
+        if r in KILLER_ROUNDS:
+            info = KILLER_ROUNDS[r]
+            killer_seen.append(f"R{r}: {info.name}")
+
+    # Build grouped, clickable MistakeItems pointing to exact clip timestamps
     mistakes: list[MistakeItem] = []
 
-    # 1. Contiguous Boost Starvation stretches (<= 12 boost for >= 3.0s)
-    run: list[FrameMetrics] = []
-    for m in live:
-        if m.boost_pct <= 12.0:
-            run.append(m)
-        else:
-            if len(run) * step_sec >= 3.0:
-                dur = round(len(run) * step_sec, 1)
-                mistakes.append(
-                    MistakeItem(
-                        category="Boost Starvation",
-                        severity="high" if dur >= 5.0 else "medium",
-                        timestamp_sec=max(0.0, round(run[0].timestamp_sec - 0.5, 2)),
-                        original_video_sec=max(0.0, round(run[0].original_video_sec - 0.5, 2)),
-                        duration_sec=dur,
-                        summary=f"Stayed on 0-12 boost for {dur:.1f}s without collecting pads.",
-                        how_to_fix=(
-                            "Route through midfield 12-boost small pads while rotating so you "
-                            "always have 24-36 boost for emergency saves."
-                        ),
-                    )
-                )
-            run = []
-    if len(run) * step_sec >= 3.0:
-        dur = round(len(run) * step_sec, 1)
-        mistakes.append(
-            MistakeItem(
-                category="Boost Starvation",
-                severity="high" if dur >= 5.0 else "medium",
-                timestamp_sec=max(0.0, round(run[0].timestamp_sec - 0.5, 2)),
-                original_video_sec=max(0.0, round(run[0].original_video_sec - 0.5, 2)),
-                duration_sec=dur,
-                summary=f"Stayed on 0-12 boost for {dur:.1f}s without collecting pads.",
-                how_to_fix=(
-                    "Route through midfield 12-boost small pads while rotating so you "
-                    "always have 24-36 boost for emergency saves."
-                ),
-            )
+    # 1. Bloon Leaks (especially leaks while hoarding unspent cash!)
+    for le in leak_events:
+        cash_str = f"${le.cash_at_event:,}" if le.cash_at_event is not None else "$?"
+        r_info = KILLER_ROUNDS.get(le.round_num or -1)
+        fix = (
+            r_info.wiki_advice
+            if r_info
+            else f"Spend your unspent cash ({cash_str}) on defense upgrades before this wave hits."
         )
-
-    # 2. Panic Burnouts (dropping >= 55 boost straight down to <= 12 within <= 3.5s)
-    burnout_events = [e for e in events if e.event_type == EventType.PANIC_BURNOUT]
-    for be in burnout_events:
         mistakes.append(
             MistakeItem(
-                category="Panic Boost Burnout",
+                category=f"Bloon Leak (Round {le.round_num or '?'})",
                 severity="high",
-                timestamp_sec=max(0.0, round(be.timestamp_sec - 1.0, 2)),
-                original_video_sec=max(0.0, round(be.original_video_sec - 1.0, 2)),
-                duration_sec=be.duration_sec,
-                summary=be.visual_evidence,
-                how_to_fix=(
-                    "Stop holding boost once you hit supersonic — flip for momentum and save "
-                    "25-35 boost for recovery."
-                ),
+                timestamp_sec=max(0.0, round(le.timestamp_sec - 1.5, 2)),
+                original_video_sec=max(0.0, round(le.original_video_sec - 1.5, 2)),
+                round_num=le.round_num,
+                summary=f"{le.visual_evidence} (Unspent cash at leak: {cash_str}).",
+                how_to_fix=fix,
             )
         )
 
-    # 3. Over-Capped Passive Stretches (>= 96 boost for >= 6.0s)
-    cap_run: list[FrameMetrics] = []
-    for m in live:
-        if m.boost_pct >= 96.0:
-            cap_run.append(m)
+    # 2. Cash Hoarding stretches (>= $2,500 unspent for >= 10s without spending)
+    hoard_run: list[FrameMetrics] = []
+    for m in valid:
+        if m.cash is not None and m.cash >= 2500:
+            hoard_run.append(m)
         else:
-            if len(cap_run) * step_sec >= 6.0:
-                dur = round(len(cap_run) * step_sec, 1)
+            if len(hoard_run) * step_sec >= 10.0:
+                dur = round(len(hoard_run) * step_sec, 1)
+                peak = max(f.cash or 0 for f in hoard_run)
+                r0 = hoard_run[0].round_num
                 mistakes.append(
                     MistakeItem(
-                        category="Over-Capped / Passive Play",
+                        category=f"Cash Hoarding (Round {r0 or '?'})",
                         severity="medium",
-                        timestamp_sec=max(0.0, round(cap_run[0].timestamp_sec - 0.5, 2)),
-                        original_video_sec=max(0.0, round(cap_run[0].original_video_sec - 0.5, 2)),
-                        duration_sec=dur,
-                        summary=f"Sat at 96-100 boost for {dur:.1f}s (wasting pad pickups).",
+                        timestamp_sec=max(0.0, round(hoard_run[0].timestamp_sec - 0.5, 2)),
+                        original_video_sec=max(
+                            0.0, round(hoard_run[0].original_video_sec - 0.5, 2)
+                        ),
+                        round_num=r0,
+                        summary=f"Held ${peak:,} unspent cash for {dur:.0f}s.",
                         how_to_fix=(
-                            "Use boost proactively to stay close to the play and maintain pressure "
-                            "instead of camping at 100."
+                            "Unless saving for a specific Tier 4/5 upgrade, reinvest idle cash "
+                            "into Eco (Farms) or upcoming killer-round counters."
                         ),
                     )
                 )
-            cap_run = []
-    if len(cap_run) * step_sec >= 6.0:
-        dur = round(len(cap_run) * step_sec, 1)
-        mistakes.append(
-            MistakeItem(
-                category="Over-Capped / Passive Play",
-                severity="medium",
-                timestamp_sec=max(0.0, round(cap_run[0].timestamp_sec - 0.5, 2)),
-                original_video_sec=max(0.0, round(cap_run[0].original_video_sec - 0.5, 2)),
-                duration_sec=dur,
-                summary=f"Sat at 96-100 boost for {dur:.1f}s (wasting pad pickups).",
-                how_to_fix=(
-                    "Use boost proactively to stay close to the play and maintain pressure "
-                    "instead of camping at 100."
-                ),
-            )
-        )
+            hoard_run = []
+
+    # 3. Upcoming Killer Round Wiki Check (if we saw a killer round without a clear counter tower)
+    observed_roles = {role for t in towers_seen for role in TOWER_ROLES.get(t, ())}
+    for r in seen_r_set:
+        if r in KILLER_ROUNDS:
+            info = KILLER_ROUNDS[r]
+            missing = [tag for tag in info.threat_tags if tag not in observed_roles]
+            if missing and towers_seen:
+                first_m = next((m for m in valid if m.round_num == r), valid[0])
+                mistakes.append(
+                    MistakeItem(
+                        category=f"Wiki Checkpoint: R{r} {info.name}",
+                        severity="medium",
+                        timestamp_sec=max(0.0, round(first_m.timestamp_sec - 0.5, 2)),
+                        original_video_sec=max(0.0, round(first_m.original_video_sec - 0.5, 2)),
+                        round_num=r,
+                        summary=(
+                            f"Reached Round {r} ({info.name}); observed towers "
+                            f"({', '.join(towers_seen[:4])}) didn't show explicit "
+                            f"{'/'.join(missing)} counter panel."
+                        ),
+                        how_to_fix=info.wiki_advice,
+                    )
+                )
 
     mistakes.sort(key=lambda item: (0 if item.severity == "high" else 1, item.timestamp_sec))
     mistakes = sorted(mistakes[:8], key=lambda item: item.timestamp_sec)
 
-    # Overall Boost Management Score (0-100): rewards balanced 45-68 avg boost, low starvation,
-    # low over-capping, small-pad pathing, and zero panic burnouts.
-    avg_penalty = max(0.0, abs(avg_boost - 55.0) - 12.0) * 0.9
-    starve_penalty = starved_pct * 0.85
-    cap_penalty = max(0.0, over_capped_pct - 10.0) * 0.6
-    burnout_penalty = len(burnout_events) * 7.0
-    pad_bonus = min(10.0, small_pads * 2.0)
-    raw_score = 92.0 - avg_penalty - starve_penalty - cap_penalty - burnout_penalty + pad_bonus
-    overall = max(10.0, min(100.0, round(raw_score, 1)))
+    # Overall Strategy Score (0-100): zero leaks + active cash reinvestment + clean killer rounds
+    leak_pen = min(45.0, lives_lost * 2.5 + len(leak_events) * 10.0)
+    hoard_pen = min(20.0, sum(1 for mk in mistakes if "Hoarding" in mk.category) * 8.0)
+    spend_ratio = total_spent / max(1, total_earned)
+    efficiency_bonus = min(10.0, spend_ratio * 10.0)
+    overall = max(15.0, min(100.0, round(88.0 - leak_pen - hoard_pen + efficiency_bonus, 1)))
 
     drills: list[str] = []
-    if starved_pct >= 20.0:
+    if lives_lost > 0:
         drills.append(
-            f"Boost Starvation ({starved_pct:.0f}% of clip at <=12 boost): Practice small-pad "
-            "rotation lanes in Free Play so you pick up 2-3 small pads every rotation."
+            f"Zero-Leak Defense ({lives_lost} lives lost): Spend unspent cash before key spike "
+            "rounds (R24 Camo, R28 Lead, R40 MOAB, R63 Ceramics)."
         )
-    if burnout_events:
+    if killer_seen:
         drills.append(
-            f"Panic Burnouts ({len(burnout_events)}x): Release boost immediately upon hitting "
-            "supersonic and use front-flips/wavedashes to preserve 30+ boost for defense."
+            f"Wiki Checkpoints Covered ({', '.join(killer_seen[:3])}): Verify Camo + Lead + "
+            "Ceramic pierce counters are online 1-2 rounds early."
         )
-    if over_capped_pct >= 20.0:
+    if has_eco:
         drills.append(
-            f"Over-Capped ({over_capped_pct:.0f}% at 96-100 boost): Push closer to the play "
-            "as 2nd man — sitting at 100 boost means you're conceding midfield pressure."
-        )
-    if small_pads == 0 and big_pads >= 2:
-        drills.append(
-            "Small-Pad Pathing: You relied exclusively on 100-boost corner pads; grabbing small "
-            "pads keeps you in the play without rotating all the way to the corners."
+            "Eco / Farming Detected: Balance greed vs. defense — stop farming 2 rounds before "
+            "Round 40 (MOAB) and Round 63 (Ceramic Rush)."
         )
     if not drills:
         drills.append(
-            f"Strong boost discipline (avg {avg_boost:.0f}, only {starved_pct:.0f}% starved) — "
-            "review the key moment filmstrips to fine-tune challenge timing."
+            f"Clean zero-leak economy (${total_spent:,} invested across {len(purchase_events)} "
+            f"upgrades from Round {start_round or '?'} to {end_round or '?'})."
         )
 
-    goal_count = sum(1 for e in events if e.event_type == EventType.GOAL_EXPLOSION)
-    avg_speed = round(float(np.mean([m.field_motion for m in live])), 2)
-
-    return BoostScorecard(
-        overall_boost_score=overall,
-        avg_boost=avg_boost,
-        boost_spent_per_min=bpm,
-        starved_pct=starved_pct,
-        starved_seconds=starved_sec,
-        over_capped_pct=over_capped_pct,
-        over_capped_seconds=over_capped_sec,
-        big_pad_pickups=big_pads,
-        small_pad_pickups=small_pads,
-        small_pad_ratio=small_pad_ratio,
-        panic_burnouts=len(burnout_events),
-        avg_recovery_sec=avg_recovery,
-        goal_explosions=goal_count,
-        avg_field_speed=avg_speed,
-        live_hud_seconds=live_sec,
+    return BTD6Scorecard(
+        overall_strategy_score=overall,
+        game_mode=game_mode,
+        start_round=start_round,
+        end_round=end_round,
+        rounds_progressed=rounds_progressed,
+        lives_lost=lives_lost,
+        total_cash_spent=total_spent,
+        total_cash_earned=total_earned,
+        avg_unspent_cash=avg_cash,
+        peak_unspent_cash=peak_cash,
+        purchase_count=len(purchase_events),
+        has_eco_farming=has_eco,
+        towers_observed=towers_seen,
+        killer_rounds_seen=killer_seen,
         mistakes=mistakes,
         improvement_drills=drills,
     )
@@ -243,14 +209,15 @@ def compute_boost_scorecard(
 def build_moment_filmstrip(
     frames_bgr: list[np.ndarray],
     timestamps: list[float],
-    boosts: list[float],
+    rounds: list[int | None],
+    cashes: list[int | None],
     *,
     event_idx: int,
     event_label: str,
     fps: float,
     output_path: Path,
 ) -> Path:
-    """Stitch a 3-frame Rocket League strip: BEFORE (-1.5s) | MOMENT (0.0s) | AFTER (+1.0s)."""
+    """Stitch a 3-frame BTD6 strip: BEFORE (-1.5s) | MOMENT (0.0s) | AFTER (+1.0s)."""
     offsets_sec = (-1.5, 0.0, 1.0)
     stage_names = ("1. BEFORE (-1.5s)", "2. MOMENT (0.0s)", "3. AFTER (+1.0s)")
     tiles: list[np.ndarray] = []
@@ -261,13 +228,15 @@ def build_moment_filmstrip(
         resized = cv2.resize(frames_bgr[idx], (tile_w, tile_h), interpolation=cv2.INTER_AREA)
         cv2.rectangle(resized, (0, 0), (tile_w, 26), (15, 23, 42), -1)
         ts_str = format_timestamp(timestamps[idx])
+        r_lbl = f"R{rounds[idx]}" if rounds[idx] is not None else "R?"
+        c_lbl = f"${cashes[idx]:,}" if cashes[idx] is not None else "$?"
         cv2.putText(
             resized,
-            f"{stage_name} | {ts_str} | Boost {boosts[idx]:.0f}",
+            f"{stage_name} | {ts_str} | {r_lbl} {c_lbl}",
             (8, 18),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.46,
-            (251, 191, 36),
+            0.44,
+            (74, 222, 128),
             1,
             cv2.LINE_AA,
         )
@@ -277,7 +246,7 @@ def build_moment_filmstrip(
     header = np.full((28, strip.shape[1], 3), (2, 6, 23), dtype=np.uint8)
     cv2.putText(
         header,
-        f"THE-EYE ROCKET LEAGUE | {event_label.upper()}",
+        f"THE-EYE BTD6 | {event_label.upper()}",
         (10, 19),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.52,

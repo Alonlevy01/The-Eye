@@ -1,4 +1,4 @@
-"""Vision-Language Model (VLM) Rocket League coach reviewing 3-frame moment filmstrips."""
+"""Vision-Language Model (VLM) BTD6 Strategy Coach reviewing 3-frame build-order filmstrips."""
 
 from __future__ import annotations
 
@@ -12,26 +12,26 @@ import cv2
 import httpx
 
 from the_eye.config import Settings
-from the_eye.schemas import BoostScorecard, ClipSummary, DetectedEvent, format_timestamp
+from the_eye.schemas import BTD6Scorecard, ClipSummary, DetectedEvent, format_timestamp
 
-VLM_SYSTEM_PROMPT = """You are a Supersonic Legend (SSL) Rocket League coach reviewing 3-frame
-moment filmstrips (1. BEFORE -1.5s | 2. MOMENT 0.0s | 3. AFTER +1.0s) paired with exact
-on-screen Boost Gauge readings (0-100).
+VLM_SYSTEM_PROMPT = """You are a veteran Bloons TD 6 (BTD6) CHIMPS strategist reviewing 3-frame
+gameplay filmstrips (1. BEFORE -1.5s | 2. MOMENT 0.0s | 3. AFTER +1.0s) paired with HUD-verified
+Round, Cash ($), Lives, and Observed Towers.
 
 Return STRICT JSON ONLY (no markdown fences, no extra prose):
 {
   "event_observations": {
-    "E1": "1-2 concise sentences explaining what happened with boost, positioning, or rotation.",
+    "E1": "1-2 concise sentences evaluating the tower placement, upgrade timing, or round threat.",
     "E2": "..."
   },
-  "tactical_summary": "3-4 actionable Rocket League coaching takeaways grounded in the boost stats."
+  "tactical_summary": "3-4 actionable BTD6 strategy takeaways (placement synergy, eco vs defense,
+   and preparing for upcoming killer rounds like R40/R63/R90)."
 }
 
 RULES:
-1. Reference ONLY what is visibly happening in the frames and the measured boost numbers.
-2. Focus on actionable Rocket League habits (small-pad pathing, back-post rotation, supersonic
-   preservation, avoiding panic boost burns).
-3. Keep every observation honest and concise."""
+1. Reference ONLY towers, upgrades, and HUD numbers actually visible in the frames or stats.
+2. Focus on real BTD6 strategy (tower range/synergy, Alch-buff placement, Camo/Lead/MOAB prep).
+3. Keep every tip clear and useful for a BTD6 player."""
 
 
 def encode_image_base64_jpeg(image_path: Path, *, max_width: int = 960) -> str:
@@ -68,7 +68,7 @@ def build_vlm_messages(
     title: str,
     summary: ClipSummary,
     events: list[DetectedEvent],
-    scorecard: BoostScorecard | None = None,
+    scorecard: BTD6Scorecard | None = None,
     max_frames: int = 3,
 ) -> list[dict[str, Any]]:
     """Build multimodal messages preferring 3-frame moment filmstrips over single frames."""
@@ -83,23 +83,22 @@ def build_vlm_messages(
 
     meta_lines = [
         f"Recording: {title}",
-        f"Clip stats: duration={summary.analyzed_duration_sec:.1f}s, "
-        f"events={summary.total_events}.",
+        f"Clip duration: {summary.analyzed_duration_sec:.1f}s | Events: {summary.total_events}.",
     ]
     if scorecard is not None:
         meta_lines.append(
-            f"Measured Boost Stats: score={scorecard.overall_boost_score:.1f}/100, "
-            f"avg_boost={scorecard.avg_boost:.1f}, starved={scorecard.starved_pct:.1f}% "
-            f"({scorecard.starved_seconds:.1f}s), over_capped={scorecard.over_capped_pct:.1f}%, "
-            f"big_pads={scorecard.big_pad_pickups}, small_pads={scorecard.small_pad_pickups}, "
-            f"panic_burnouts={scorecard.panic_burnouts}."
+            f"HUD-Verified BTD6 Stats: mode={scorecard.game_mode}, "
+            f"rounds=R{scorecard.start_round}-R{scorecard.end_round}, "
+            f"lives_lost={scorecard.lives_lost}, spent=${scorecard.total_cash_spent:,}, "
+            f"towers={', '.join(scorecard.towers_observed) or 'n/a'}, "
+            f"killer_rounds={', '.join(scorecard.killer_rounds_seen) or 'none'}."
         )
 
-    meta_lines.append("Selected moments to diagnose:")
+    meta_lines.append("Selected BTD6 moments to review:")
     for e, _ in chosen:
         meta_lines.append(
             f"- {e.event_id} [{e.event_type.value}] at clip {format_timestamp(e.timestamp_sec)} "
-            f"(boost={e.boost_at_event:.0f}): {e.visual_evidence}"
+            f"(R{e.round_num or '?'}): {e.visual_evidence}"
         )
 
     user_parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(meta_lines)}]
@@ -119,12 +118,12 @@ def run_vlm_coaching(
     title: str,
     summary: ClipSummary,
     events: list[DetectedEvent],
-    scorecard: BoostScorecard | None = None,
+    scorecard: BTD6Scorecard | None = None,
     settings: Settings | None = None,
     model_override: str | None = None,
     max_frames: int = 3,
 ) -> tuple[dict[str, str], str, str]:
-    """Run VLM Rocket League coaching via Ollama (`ollama:<model>`) or OpenRouter."""
+    """Run VLM BTD6 coaching via Ollama (`ollama:<model>`) or OpenRouter."""
     cfg = settings or Settings()
     model_spec = (model_override or cfg.vlm_model).strip()
     messages = build_vlm_messages(

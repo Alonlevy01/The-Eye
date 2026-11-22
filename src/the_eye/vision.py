@@ -1,32 +1,37 @@
-"""Deterministic OpenCV Rocket League Boost Gauge (0-100) polar scanner & HUD analyzer."""
+"""BTD6 Computer Vision HUD Reader (RapidOCR) for Lives, Cash ($), Round, and Selected Tower."""
 
 from __future__ import annotations
 
-import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 
+from the_eye.btd6_wiki import match_tower_name
 from the_eye.schemas import FrameMetrics, format_timestamp
 
-# Calibrated 16:9 Rocket League Boost Gauge geometry (verified on real SSL & Gold POVs):
-# Center at (0.912*W, 0.840*H), outer tick ring radius 0.086*H..0.114*H,
-# clockwise angular sweep from 102 deg (0 boost) -> 306 deg (100 boost) = 204 deg span.
-GAUGE_CX_NORM = 0.912
-GAUGE_CY_NORM = 0.840
-GAUGE_R_IN_NORM = 0.086
-GAUGE_R_OUT_NORM = 0.114
-GAUGE_START_DEG = 102.0
-GAUGE_SPAN_DEG = 204.0
+# Top HUD strip covering Lives, Cash ($), Round (X/Y), and open Upgrade Panel titles
+TOP_HUD_ROI = (0.0, 0.0, 0.85, 0.115)
+PLAYABLE_MAP_ROI = (0.02, 0.12, 0.82, 0.94)
 
-CENTER_FIELD_ROI = (0.20, 0.25, 0.80, 0.78)
+_OCR_INSTANCE: Any | None = None
+
+
+def _get_ocr() -> Any:
+    global _OCR_INSTANCE
+    if _OCR_INSTANCE is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _OCR_INSTANCE = RapidOCR()
+    return _OCR_INSTANCE
 
 
 @dataclass
 class SampledFrame:
-    """A decoded BGR frame paired with its extracted Rocket League visual telemetry."""
+    """A decoded BGR frame paired with its extracted BTD6 HUD & map telemetry."""
 
     metrics: FrameMetrics
     bgr: np.ndarray
@@ -43,68 +48,107 @@ def _crop_norm(frame: np.ndarray, roi: tuple[float, float, float, float]) -> np.
     return frame[max(0, y1) : max(1, y2), max(0, x1) : max(1, x2)]
 
 
-def read_boost_gauge(bgr_frame: np.ndarray) -> tuple[bool, float]:
-    """Read Rocket League's bottom-right circular Boost Gauge (0-100) via polar arc scanning.
-
-    Returns `(hud_visible, boost_pct)`. When a goal replay or menu hides the dark circular
-    gauge backing, returns `(False, 0.0)` so replays don't pollute live boost statistics.
-    """
-    h, w = bgr_frame.shape[:2]
-    hsv = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2HSV)
-    cx = int(round(GAUGE_CX_NORM * w))
-    cy = int(round(GAUGE_CY_NORM * h))
-
-    # Check dark circular gauge backing (radius ~0.065*H around center) to confirm live HUD
-    r_bg = max(4, int(round(0.060 * h)))
-    y1, y2 = max(0, cy - r_bg), min(h, cy + r_bg)
-    x1, x2 = max(0, cx - r_bg), min(w, cx + r_bg)
-    inner_v = hsv[y1:y2, x1:x2, 2]
-    # Live boost gauge has a dark translucent circular backing (median V < 110)
-    if inner_v.size == 0 or float(np.median(inner_v)) > 125.0:
-        return False, 0.0
-
-    r_in = GAUGE_R_IN_NORM * h
-    r_out = GAUGE_R_OUT_NORM * h
-    num_bins = 100
-    lit_bins: list[bool] = []
-
-    for i in range(num_bins):
-        deg = GAUGE_START_DEG + (i / (num_bins - 1)) * GAUGE_SPAN_DEG
-        rad = math.radians(deg)
-        cos_a, sin_a = math.cos(rad), math.sin(rad)
-        is_lit = False
-        for r in np.linspace(r_in, r_out, 5):
-            px = int(round(cx + r * cos_a))
-            py = int(round(cy + r * sin_a))
-            if 0 <= px < w and 0 <= py < h:
-                H = int(hsv[py, px, 0])
-                S = int(hsv[py, px, 1])
-                V = int(hsv[py, px, 2])
-                # Rocket League boost arc is dark-orange (low) to bright-yellow (high)
-                if 2 <= H <= 38 and S >= 110 and V >= 130:
-                    is_lit = True
-                    break
-        lit_bins.append(is_lit)
-
-    # Walk clockwise from 0 boost allowing up to 4 dark gap bins (tick-mark spacing)
-    highest_lit = -1
-    gap = 0
-    for idx, hit in enumerate(lit_bins):
-        if hit:
-            highest_lit = idx
-            gap = 0
+def parse_btd6_hud_texts(
+    items: list[tuple[float, str]] | list[tuple[float, float, str]],
+) -> tuple[int | None, int | None, int | None, int | None, str | None]:
+    """Parse `(lives, cash, round_num, max_round, selected_tower)` from OCR items."""
+    normalized: list[tuple[float, float, str]] = []
+    for item in items:
+        if len(item) == 3:
+            normalized.append((float(item[0]), float(item[1]), str(item[2])))
         else:
-            gap += 1
-            if gap > 5 and highest_lit >= 0:
-                break
-            if gap > 8 and highest_lit < 0:
-                # No lit ticks near the bottom start -> boost is 0
-                break
+            normalized.append((float(item[0]), 0.25, str(item[1])))
 
-    if highest_lit < 0:
-        return True, 0.0
-    boost_pct = round(min(100.0, (highest_lit + 1) * (100.0 / num_bins)), 1)
-    return True, boost_pct
+    ordered = sorted(normalized, key=lambda entry: entry[0])
+    cash: int | None = None
+    cash_x: float | None = None
+    cash_y: float | None = None
+    round_num: int | None = None
+    max_round: int | None = None
+    lives: int | None = None
+    selected_tower: str | None = None
+
+    for x_pos, y_norm, raw in ordered:
+        text = raw.strip()
+        if not text:
+            continue
+
+        # 1. Cash: "$317", "$1,250", "$14,820" (top HUD bar)
+        m_cash = re.search(r"\$\s*([\d,]+)", text)
+        if m_cash and cash is None and y_norm < 0.65:
+            digits = m_cash.group(1).replace(",", "")
+            if digits.isdigit():
+                cash = int(digits)
+                cash_x = x_pos
+                cash_y = y_norm
+                continue
+
+        # 2. Round: "30/100", "26/80", "59/60", "61/70", "14/40"
+        m_round = re.search(r"(\d{1,3})\s*/\s*(\d{2,3})", text)
+        if m_round and round_num is None:
+            r_cur = int(m_round.group(1))
+            r_max = int(m_round.group(2))
+            if 30 <= r_max <= 140 and 1 <= r_cur <= r_max + 20:
+                round_num = r_cur
+                max_round = r_max
+                continue
+
+        # 3. Selected tower panel title (e.g. "MONKeYVILLAGe" -> "Monkey Village")
+        if selected_tower is None:
+            tower = match_tower_name(text)
+            if tower is not None:
+                selected_tower = tower
+
+    # 4. Lives: strictly in the top heart row (y_norm < 0.58) and directly left of Cash,
+    #    ignoring tower pop counts that appear lower inside an open left upgrade panel.
+    lives_candidates: list[tuple[float, int]] = []
+    for x_pos, y_norm, raw in ordered:
+        if y_norm >= 0.58:
+            continue
+        if cash_x is not None and x_pos >= cash_x:
+            continue
+        if cash_y is not None and abs(y_norm - cash_y) > 0.25:
+            continue
+        cleaned = raw.strip().replace(",", "")
+        if cleaned.isdigit():
+            val = int(cleaned)
+            if 0 <= val <= 9999:
+                lives_candidates.append((x_pos, val))
+        elif cleaned in ("I", "l", "L", "|") and max_round == 100:
+            lives_candidates.append((x_pos, 1))
+
+    if lives_candidates:
+        # Closest candidate to the left of Cash is the Heart/Lives counter
+        lives = lives_candidates[-1][1]
+
+    # In CHIMPS (max_round == 100), if lives is unread because '1' is super narrow, infer 1
+    if lives is None and max_round == 100 and cash is not None:
+        lives = 1
+
+    return lives, cash, round_num, max_round, selected_tower
+
+
+def read_btd6_hud(
+    bgr_frame: np.ndarray,
+    *,
+    ocr_engine: Any | None = None,
+) -> tuple[int | None, int | None, int | None, int | None, str | None]:
+    """Run RapidOCR on BTD6's top HUD strip and parse Lives, Cash, Round, and Selected Tower."""
+    engine = ocr_engine or _get_ocr()
+    top_strip = _crop_norm(bgr_frame, TOP_HUD_ROI)
+    strip_h = max(1.0, float(top_strip.shape[0]))
+    res, _ = engine(top_strip)
+    items: list[tuple[float, float, str]] = []
+    for entry in res or []:
+        box, text = entry[0], str(entry[1])
+        if box:
+            x_left = float(min(pt[0] for pt in box))
+            y_center = float(sum(pt[1] for pt in box)) / float(len(box))
+            y_norm = y_center / strip_h
+        else:
+            x_left, y_norm = 0.0, 0.25
+        items.append((x_left, y_norm, text))
+    return parse_btd6_hud_texts(items)
 
 
 def analyze_single_frame(
@@ -113,49 +157,39 @@ def analyze_single_frame(
     frame_index: int,
     timestamp_sec: float,
     original_video_sec: float,
-    prev_field_gray: np.ndarray | None = None,
-    prev_boost: float | None = None,
+    prev_map_gray: np.ndarray | None = None,
+    ocr_engine: Any | None = None,
 ) -> tuple[FrameMetrics, np.ndarray]:
-    """Extract Rocket League boost gauge reading, brightness, and field motion for one frame."""
-    hsv = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2HSV)
+    """Extract BTD6 HUD telemetry and static-map activity delta for one BGR frame."""
+    lives, cash, round_num, max_round, tower = read_btd6_hud(bgr_frame, ocr_engine=ocr_engine)
+
     gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
-
-    brightness = round(float(np.mean(hsv[:, :, 2])), 2)
-    saturation = round(float(np.mean(hsv[:, :, 1])), 2)
-    hud_visible, boost_pct = read_boost_gauge(bgr_frame)
-
-    boost_delta = 0.0
-    if hud_visible and prev_boost is not None:
-        boost_delta = round(boost_pct - prev_boost, 1)
-
-    field_gray = _crop_norm(gray, CENTER_FIELD_ROI)
-    field_motion = 0.0
-    if prev_field_gray is not None and prev_field_gray.shape == field_gray.shape:
-        field_motion = round(float(np.mean(cv2.absdiff(field_gray, prev_field_gray))), 2)
+    map_gray = cv2.resize(_crop_norm(gray, PLAYABLE_MAP_ROI), (320, 180))
+    map_activity = 0.0
+    if prev_map_gray is not None and prev_map_gray.shape == map_gray.shape:
+        map_activity = round(float(np.mean(cv2.absdiff(map_gray, prev_map_gray))), 2)
 
     metrics = FrameMetrics(
         frame_index=frame_index,
         timestamp_sec=round(timestamp_sec, 2),
         original_video_sec=round(original_video_sec, 2),
-        hud_visible=hud_visible,
-        boost_pct=boost_pct,
-        boost_delta=boost_delta,
-        brightness=brightness,
-        saturation=saturation,
-        field_motion=field_motion,
+        lives=lives,
+        cash=cash,
+        round_num=round_num,
+        max_round=max_round,
+        selected_tower=tower,
+        map_activity=map_activity,
     )
-    return metrics, field_gray
+    return metrics, map_gray
 
 
 def sample_video_frames(
     video_path: Path,
     *,
-    fps: float = 5.0,
+    fps: float = 2.0,
     excerpt_start_sec: float = 0.0,
 ) -> list[SampledFrame]:
-    """Decode a Rocket League video at `fps` samples/sec (default 5 fps) with 3-frame boost
-    median smoothing so transient orange explosions never create single-frame spikes.
-    """
+    """Decode a BTD6 video at `fps` samples/sec, read HUD via OCR, and smooth transient glitches."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"OpenCV could not open video: {video_path}")
@@ -165,9 +199,9 @@ def sample_video_frames(
         native_fps = 30.0
     step = max(1, int(round(native_fps / fps)))
 
+    ocr = _get_ocr()
     sampled: list[SampledFrame] = []
-    prev_field: np.ndarray | None = None
-    prev_boost: float | None = None
+    prev_map: np.ndarray | None = None
     raw_idx = 0
     sample_idx = 0
 
@@ -178,48 +212,121 @@ def sample_video_frames(
                 break
             if raw_idx % step == 0:
                 ts = raw_idx / native_fps
-                metrics, prev_field = analyze_single_frame(
+                metrics, prev_map = analyze_single_frame(
                     frame,
                     frame_index=sample_idx,
                     timestamp_sec=ts,
                     original_video_sec=excerpt_start_sec + ts,
-                    prev_field_gray=prev_field,
-                    prev_boost=prev_boost,
+                    prev_map_gray=prev_map,
+                    ocr_engine=ocr,
                 )
-                if metrics.hud_visible:
-                    prev_boost = metrics.boost_pct
                 sampled.append(SampledFrame(metrics=metrics, bgr=frame.copy()))
                 sample_idx += 1
             raw_idx += 1
     finally:
         cap.release()
 
-    # Apply 3-frame median filter on live-HUD boost_pct to eliminate 1-frame occlusion glitches
-    n = len(sampled)
-    if n >= 3:
-        smoothed: list[float] = [sf.metrics.boost_pct for sf in sampled]
-        for i in range(1, n - 1):
+    # Post-process: enforce clean rounds & cash/lives deltas (ignoring non-HUD intro/menu frames)
+    raw_lives = [
+        sf.metrics.lives
+        if (sf.metrics.cash is not None or sf.metrics.round_num is not None)
+        else None
+        for sf in sampled
+    ]
+    raw_rounds = [sf.metrics.round_num for sf in sampled]
+    valid_lives = [lv for lv in raw_lives if lv is not None]
+    valid_max_rounds = [sf.metrics.max_round for sf in sampled if sf.metrics.max_round is not None]
+    clip_max_round = (
+        max(set(valid_max_rounds), key=valid_max_rounds.count) if valid_max_rounds else None
+    )
+    is_chimps_like = (
+        clip_max_round == 100
+        and valid_lives
+        and (sum(1 for lv in valid_lives if lv == 1) / len(valid_lives)) >= 0.4
+    )
+
+    # 3-frame median filter on raw lives to suppress 1-frame OCR misreads
+    smoothed_lives: list[int | None] = []
+    for idx, lv in enumerate(raw_lives):
+        if is_chimps_like:
+            smoothed_lives.append(0 if lv == 0 else 1)
+            continue
+        window = [
+            raw_lives[j]
+            for j in range(max(0, idx - 1), min(len(raw_lives), idx + 2))
+            if raw_lives[j] is not None
+        ]
+        if window:
+            window.sort()
+            smoothed_lives.append(window[len(window) // 2])
+        else:
+            smoothed_lives.append(lv)
+
+    last_round: int | None = None
+    last_max_round: int | None = None
+    last_cash: int | None = None
+    last_lives: int | None = None
+
+    for idx, sf in enumerate(sampled):
+        m = sf.metrics
+        r = m.round_num
+        mr = m.max_round or last_max_round
+        if r is not None:
+            next_r = raw_rounds[idx + 1] if idx + 1 < len(raw_rounds) else None
+            confirmed_jump = next_r is not None and abs(next_r - r) <= 2
             if (
-                sampled[i - 1].metrics.hud_visible
-                and sampled[i].metrics.hud_visible
-                and sampled[i + 1].metrics.hud_visible
+                last_round is not None
+                and (r < last_round or r > last_round + 5)
+                and not confirmed_jump
             ):
-                smoothed[i] = float(
-                    np.median(
-                        [
-                            sampled[i - 1].metrics.boost_pct,
-                            sampled[i].metrics.boost_pct,
-                            sampled[i + 1].metrics.boost_pct,
-                        ]
-                    )
-                )
-        last_live: float | None = None
-        for i, sf in enumerate(sampled):
-            if sf.metrics.hud_visible:
-                b = round(smoothed[i], 1)
-                delta = round(b - last_live, 1) if last_live is not None else 0.0
-                sf.metrics = sf.metrics.model_copy(update={"boost_pct": b, "boost_delta": delta})
-                last_live = b
+                r = last_round  # reject single-frame OCR misread
+            else:
+                last_round = r
+        else:
+            r = last_round
+        if mr is not None:
+            last_max_round = mr
+
+        c = m.cash
+        cash_delta = 0
+        if c is not None:
+            # Reject extreme single-frame OCR digit drops/explosions (> $200k jump in 0.5s)
+            if last_cash is not None and abs(c - last_cash) > 200_000:
+                c = last_cash
+            elif last_cash is not None:
+                cash_delta = c - last_cash
+            last_cash = c
+        else:
+            c = last_cash
+
+        lv = smoothed_lives[idx]
+        lives_delta = 0
+        if lv is not None:
+            next_lv = smoothed_lives[idx + 1] if idx + 1 < len(smoothed_lives) else None
+            confirmed_lv = next_lv is not None and abs(next_lv - lv) <= 5
+            if (
+                last_lives is not None
+                and (lv > last_lives + 25 or abs(lv - last_lives) > 500)
+                and not confirmed_lv
+            ):
+                # Reject 1-frame upward lives spike (e.g. pop-count OCR misread)
+                lv = last_lives
+            elif last_lives is not None:
+                lives_delta = lv - last_lives
+            last_lives = lv
+        else:
+            lv = last_lives
+
+        sf.metrics = m.model_copy(
+            update={
+                "round_num": r,
+                "max_round": mr,
+                "cash": c,
+                "lives": lv,
+                "cash_delta": cash_delta,
+                "lives_delta": lives_delta,
+            }
+        )
 
     return sampled
 
@@ -230,63 +337,35 @@ def annotate_frame(
     *,
     event_label: str,
 ) -> np.ndarray:
-    """Draw the exact polar Boost Gauge arc overlay + detected reading onto a keyframe."""
+    """Draw a clean BTD6 HUD verification banner & top-HUD ROI box onto a keyframe."""
     out = bgr_frame.copy()
     h, w = out.shape[:2]
-    cx = int(round(GAUGE_CX_NORM * w))
-    cy = int(round(GAUGE_CY_NORM * h))
-    r_mid = int(round(((GAUGE_R_IN_NORM + GAUGE_R_OUT_NORM) / 2.0) * h))
-
-    # Draw subtle full arc track + bright detected boost arc
-    cv2.ellipse(
+    cv2.rectangle(
         out,
-        (cx, cy),
-        (r_mid, r_mid),
-        0,
-        GAUGE_START_DEG,
-        GAUGE_START_DEG + GAUGE_SPAN_DEG,
-        (90, 100, 120),
+        (0, 0),
+        (int(TOP_HUD_ROI[2] * w), int(TOP_HUD_ROI[3] * h)),
+        (56, 189, 248),
         2,
-        cv2.LINE_AA,
-    )
-    if metrics.hud_visible and metrics.boost_pct > 0:
-        end_deg = GAUGE_START_DEG + (metrics.boost_pct / 100.0) * GAUGE_SPAN_DEG
-        col = (60, 220, 100) if metrics.boost_pct >= 30 else (40, 80, 245)
-        cv2.ellipse(
-            out,
-            (cx, cy),
-            (r_mid, r_mid),
-            0,
-            GAUGE_START_DEG,
-            end_deg,
-            col,
-            4,
-            cv2.LINE_AA,
-        )
-
-    cv2.putText(
-        out,
-        f"READ: {metrics.boost_pct:.0f}" if metrics.hud_visible else "REPLAY/NO HUD",
-        (max(10, cx - 70), max(22, cy - r_mid - 10)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (60, 240, 255),
-        2,
-        cv2.LINE_AA,
     )
 
     bar_h = 34
     cv2.rectangle(out, (0, h - bar_h), (w, h), (15, 23, 42), -1)
     ts_clip = format_timestamp(metrics.timestamp_sec)
-    ts_orig = format_timestamp(metrics.original_video_sec)
+    r_str = (
+        f"R{metrics.round_num}/{metrics.max_round}"
+        if metrics.round_num and metrics.max_round
+        else f"R{metrics.round_num or '?'}"
+    )
+    c_str = f"${metrics.cash:,}" if metrics.cash is not None else "$?"
+    l_str = str(metrics.lives) if metrics.lives is not None else "?"
+    t_str = f" | Tower: {metrics.selected_tower}" if metrics.selected_tower else ""
     banner = (
-        f"THE-EYE RL | {event_label.upper()} | Clip {ts_clip} (Orig {ts_orig}) | "
-        f"Boost={metrics.boost_pct:.0f}/100 | Motion={metrics.field_motion:.1f} | "
-        f"AudioRMS={metrics.audio_rms:.3f}"
+        f"THE-EYE BTD6 | {event_label.upper()} | Clip {ts_clip} | "
+        f"{r_str} | Cash {c_str} | Lives {l_str}{t_str}"
     )
     cv2.putText(
         out,
-        banner,
+        banner[:120],
         (10, h - 11),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.48,

@@ -1,4 +1,4 @@
-"""Typer + Rich CLI for The-Eye Rocket League Boost & Gameplay Analyzer."""
+"""Typer + Rich CLI for The-Eye Bloons TD 6 (BTD6) Strategy & Economy Analyzer."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from rich.table import Table
 
 from the_eye.audio import analyze_audio_cues
 from the_eye.config import Settings
+from the_eye.embeddings import compare_board_embeddings, run_visual_embedding_analysis
 from the_eye.events import detect_fused_events
 from the_eye.ingest import prepare_media
 from the_eye.report import write_comparison_html, write_html_report
@@ -26,7 +27,7 @@ from the_eye.vlm import run_vlm_coaching
 app = typer.Typer(
     name="the-eye",
     help=(
-        "The-Eye: Rocket League Boost Discipline & Gameplay Analyzer. "
+        "The-Eye: Bloons TD 6 (BTD6) Strategy, Economy & Wiki Checkpoint Analyzer. "
         "Accepts local video files (.mp4/.mkv/.webm/.mov/.avi) or YouTube URLs."
     ),
     no_args_is_help=True,
@@ -36,7 +37,7 @@ console = Console()
 
 def _slugify(text: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", text.strip()).strip("_").lower()
-    return cleaned or "rl_run"
+    return cleaned or "btd6_run"
 
 
 @app.command()
@@ -47,20 +48,27 @@ def analyze(
     ],
     title: Annotated[
         str,
-        typer.Option("--title", "-t", help="Readable title for this Rocket League recording."),
-    ] = "Rocket League Gameplay",
+        typer.Option("--title", "-t", help="Readable title for this BTD6 recording."),
+    ] = "BTD6 Gameplay",
     start: Annotated[
         float,
         typer.Option("--start", "-s", help="Start timestamp in seconds within the source video."),
     ] = 0.0,
     duration: Annotated[
         float,
-        typer.Option("--duration", "-d", help="Excerpt duration in seconds to analyze."),
-    ] = 90.0,
+        typer.Option(
+            "--duration",
+            "-d",
+            help="Excerpt duration in seconds (0 = analyze the FULL video from start to end).",
+        ),
+    ] = 0.0,
     fps: Annotated[
         float,
-        typer.Option("--fps", help="Frame sampling rate (default 5.0 fps = 200ms resolution)."),
-    ] = 5.0,
+        typer.Option(
+            "--fps",
+            help="Frame sampling rate (0 = auto: 1.0 fps for <=6m clips, 0.5 fps for full games).",
+        ),
+    ] = 0.0,
     out_dir: Annotated[
         Path | None,
         typer.Option("--out", "-o", help="Output folder for report.json, report.html & clip.mp4."),
@@ -71,15 +79,20 @@ def analyze(
     ] = None,
     no_vlm: Annotated[
         bool,
-        typer.Option("--no-vlm", help="Skip VLM coaching and run pure OpenCV + librosa analysis."),
+        typer.Option("--no-vlm", help="Skip VLM coaching and run pure OpenCV + RapidOCR + Wiki."),
+    ] = False,
+    no_embeddings: Annotated[
+        bool,
+        typer.Option("--no-embeddings", help="Skip neural image-similarity embeddings pass."),
     ] = False,
 ) -> None:
-    """Analyze a Rocket League video (local file or YouTube URL) and build coaching reports."""
+    """Analyze a BTD6 video (local file or YouTube URL) and build interactive coaching reports."""
     target_dir = out_dir or (Path("output") / _slugify(title))
     target_dir.mkdir(parents=True, exist_ok=True)
     keyframes_dir = target_dir / "keyframes"
 
-    console.print(Panel.fit(f"[bold orange1]The-Eye[/] analyzing: [bold]{title}[/]"))
+    console.print(Panel.fit(f"[bold green]The-Eye BTD6[/] analyzing: [bold]{title}[/]"))
+    cfg = Settings()
 
     with tempfile.TemporaryDirectory(prefix="the-eye-") as tmpdir:
         with console.status("Preparing video & extracting 16 kHz audio via FFmpeg..."):
@@ -90,10 +103,17 @@ def analyze(
                 duration_sec=duration,
             )
 
-        with console.status(f"Reading Rocket League Boost Gauge (0-100) @ {fps:.1f} fps..."):
+        effective_fps = fps
+        if effective_fps <= 0.0:
+            effective_fps = 0.5 if media.duration_sec > 360.0 else 1.0
+
+        with console.status(
+            f"Reading BTD6 HUD (Lives, Cash, Round & Active Tower) via RapidOCR @ "
+            f"{effective_fps:.1f} fps ({media.duration_sec:.0f}s video)..."
+        ):
             sampled = sample_video_frames(
                 media.clip_path,
-                fps=fps,
+                fps=effective_fps,
                 excerpt_start_sec=start,
             )
 
@@ -101,17 +121,40 @@ def analyze(
             enriched = analyze_audio_cues(
                 media.audio_path,
                 [sf.metrics for sf in sampled],
-                fps=fps,
+                fps=effective_fps,
             )
             for sf_item, new_m in zip(sampled, enriched, strict=True):
                 sf_item.metrics = new_m
 
-        with console.status("Computing Boost Scorecard & exporting annotated filmstrips..."):
+        with console.status(
+            "Cross-referencing Bloons Wiki checkpoints & exporting 3-frame filmstrips..."
+        ):
             events, summary, scorecard = detect_fused_events(
                 sampled,
-                fps=fps,
+                fps=effective_fps,
                 keyframes_dir=keyframes_dir,
             )
+
+        embed_backend_used: str | None = None
+        map_embedding: list[float] = []
+        round_embeddings: dict[str, list[float]] = {}
+        visual_matched_towers = 0
+        end_screen_detected = False
+        if not no_embeddings and sampled:
+            with console.status(
+                "Computing image-similarity embeddings (map fingerprint & unclicked towers)..."
+            ):
+                emb = run_visual_embedding_analysis(
+                    sampled,
+                    events,
+                    backend=cfg.embed_backend,
+                    settings=cfg,
+                )
+                embed_backend_used = emb.backend
+                map_embedding = emb.map_embedding
+                round_embeddings = emb.round_embeddings
+                visual_matched_towers = emb.visual_matched_towers
+                end_screen_detected = emb.end_screen_detected
 
         local_clip_rel: str | None = None
         if media.clip_path.exists():
@@ -121,9 +164,8 @@ def analyze(
     vlm_model_used: str | None = None
     vlm_summary: str | None = None
     if not no_vlm and events:
-        cfg = Settings()
         chosen_model = model or cfg.vlm_model
-        with console.status(f"Running VLM coaching ({chosen_model})..."):
+        with console.status(f"Running VLM BTD6 strategy review ({chosen_model})..."):
             try:
                 obs_map, vlm_summary, vlm_model_used = run_vlm_coaching(
                     title=title,
@@ -144,8 +186,8 @@ def analyze(
         source=source,
         is_url=media.is_url,
         excerpt_start_sec=start,
-        excerpt_duration_sec=duration,
-        fps=fps,
+        excerpt_duration_sec=media.duration_sec,
+        fps=effective_fps,
         summary=summary,
         scorecard=scorecard,
         events=events,
@@ -153,6 +195,11 @@ def analyze(
         vlm_model=vlm_model_used,
         vlm_tactical_summary=vlm_summary,
         local_clip_path=local_clip_rel,
+        embedding_backend=embed_backend_used,
+        map_embedding=map_embedding,
+        round_embeddings=round_embeddings,
+        visual_matched_towers=visual_matched_towers,
+        end_screen_detected=end_screen_detected,
     )
 
     json_path = target_dir / "report.json"
@@ -160,41 +207,33 @@ def analyze(
     json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     write_html_report(report, html_path)
 
-    sc_table = Table(title=f"Rocket League Boost Scorecard — {title}")
+    sc_table = Table(title=f"BTD6 Strategy & Economy Scorecard — {title}")
     sc_table.add_column("Metric", style="bold")
-    sc_table.add_column("Value", style="bold orange1")
-    rec_s = f"{scorecard.avg_recovery_sec:.1f}s" if scorecard.avg_recovery_sec else "n/a"
-    sc_table.add_row("Overall Boost Score", f"{scorecard.overall_boost_score:.1f} / 100")
-    sc_table.add_row("Average Boost Held", f"{scorecard.avg_boost:.1f} / 100")
-    sc_table.add_row("Boost Spent / Min (BPM)", f"{scorecard.boost_spent_per_min:.0f} BPM")
-    sc_table.add_row(
-        "Boost-Starved (<=12)",
-        f"{scorecard.starved_pct:.1f}% ({scorecard.starved_seconds:.1f}s)",
-    )
-    sc_table.add_row(
-        "Over-Capped (>=96)",
-        f"{scorecard.over_capped_pct:.1f}% ({scorecard.over_capped_seconds:.1f}s)",
-    )
-    sc_table.add_row(
-        "Small Pads / Big Pads",
-        f"{scorecard.small_pad_pickups} small | {scorecard.big_pad_pickups} big",
-    )
-    sc_table.add_row("Panic Burnouts", str(scorecard.panic_burnouts))
-    sc_table.add_row("Avg Starved Recovery", rec_s)
+    sc_table.add_column("Value", style="bold green")
+    r_span = f"R{scorecard.start_round} -> R{scorecard.end_round}" if scorecard.start_round else "?"
+    sc_table.add_row("Game Mode", scorecard.game_mode)
+    sc_table.add_row("Overall Strategy Score", f"{scorecard.overall_strategy_score:.1f} / 100")
+    sc_table.add_row("Rounds Covered", r_span)
+    sc_table.add_row("Lives Lost (Leaks)", str(scorecard.lives_lost))
+    sc_table.add_row("Total Cash Invested", f"${scorecard.total_cash_spent:,}")
+    sc_table.add_row("Upgrades / Placements", str(scorecard.purchase_count))
+    sc_table.add_row("Peak Unspent Cash", f"${scorecard.peak_unspent_cash:,}")
+    sc_table.add_row("Towers Observed", ", ".join(scorecard.towers_observed) or "n/a")
+    sc_table.add_row("Wiki Killer Rounds", ", ".join(scorecard.killer_rounds_seen) or "none")
     console.print(sc_table)
 
-    ev_table = Table(title=f"Detected Boost & Gameplay Events ({len(events)})")
+    ev_table = Table(title=f"Detected Build Order & Wiki Events ({len(events)})")
     ev_table.add_column("ID", style="bold cyan")
     ev_table.add_column("Type", style="bold")
     ev_table.add_column("Clip Time")
-    ev_table.add_column("Boost")
+    ev_table.add_column("Round")
     ev_table.add_column("Visual Evidence")
     for e in events:
         ev_table.add_row(
             e.event_id,
             e.event_type.value,
             format_timestamp(e.timestamp_sec),
-            f"{e.boost_at_event:.0f}",
+            f"R{e.round_num}" if e.round_num else "?",
             e.visual_evidence,
         )
     console.print(ev_table)
@@ -208,39 +247,46 @@ def compare(
     out: Annotated[
         Path,
         typer.Option("--out", "-o", help="Output path for side-by-side compare.html."),
-    ] = Path("output/compare_rl.html"),
+    ] = Path("output/compare_btd6.html"),
 ) -> None:
-    """Compare two analyzed Rocket League gameplay recordings side-by-side."""
+    """Compare two analyzed BTD6 gameplay recordings side-by-side."""
     ra = AnalysisReport.model_validate(json.loads(report_a.read_text(encoding="utf-8")))
     rb = AnalysisReport.model_validate(json.loads(report_b.read_text(encoding="utf-8")))
     sa, sb = ra.scorecard, rb.scorecard
 
-    table = Table(title="The-Eye · Rocket League Side-by-Side Comparison")
+    table = Table(title="The-Eye · BTD6 Side-by-Side Strategy Comparison")
     table.add_column("Metric", style="bold")
     table.add_column(ra.title, style="cyan")
-    table.add_column(rb.title, style="orange1")
+    table.add_column(rb.title, style="green")
+    table.add_row("Game Mode", sa.game_mode, sb.game_mode)
     table.add_row(
-        "Overall Boost Score",
-        f"{sa.overall_boost_score:.1f}/100",
-        f"{sb.overall_boost_score:.1f}/100",
+        "Overall Strategy Score",
+        f"{sa.overall_strategy_score:.1f}/100",
+        f"{sb.overall_strategy_score:.1f}/100",
     )
-    table.add_row("Average Boost Held", f"{sa.avg_boost:.1f}", f"{sb.avg_boost:.1f}")
+    table.add_row("Lives Lost", str(sa.lives_lost), str(sb.lives_lost))
+    table.add_row("Cash Invested", f"${sa.total_cash_spent:,}", f"${sb.total_cash_spent:,}")
+    table.add_row("Upgrades / Placements", str(sa.purchase_count), str(sb.purchase_count))
     table.add_row(
-        "Boost-Starved (<=12)",
-        f"{sa.starved_pct:.1f}% ({sa.starved_seconds:.1f}s)",
-        f"{sb.starved_pct:.1f}% ({sb.starved_seconds:.1f}s)",
-    )
-    table.add_row(
-        "Over-Capped (>=96)",
-        f"{sa.over_capped_pct:.1f}% ({sa.over_capped_seconds:.1f}s)",
-        f"{sb.over_capped_pct:.1f}% ({sb.over_capped_seconds:.1f}s)",
+        "Towers Observed",
+        ", ".join(sa.towers_observed) or "n/a",
+        ", ".join(sb.towers_observed) or "n/a",
     )
     table.add_row(
-        "Small / Big Pads",
-        f"{sa.small_pad_pickups} / {sa.big_pad_pickups}",
-        f"{sb.small_pad_pickups} / {sb.big_pad_pickups}",
+        "Wiki Killer Rounds",
+        ", ".join(sa.killer_rounds_seen) or "none",
+        ", ".join(sb.killer_rounds_seen) or "none",
     )
-    table.add_row("Panic Burnouts", str(sa.panic_burnouts), str(sb.panic_burnouts))
+    emb_cmp = compare_board_embeddings(
+        ra.map_embedding,
+        ra.round_embeddings,
+        rb.map_embedding,
+        rb.round_embeddings,
+    )
+    if emb_cmp["map_similarity"] is not None:
+        sim_pct = f"{emb_cmp['map_similarity'] * 100:.1f}%"
+        verdict = "Same Map" if emb_cmp["same_map_detected"] else "Different Maps"
+        table.add_row("Visual Map Similarity", f"{sim_pct} ({verdict})", f"{sim_pct} ({verdict})")
     console.print(table)
 
     write_comparison_html(ra, rb, out)

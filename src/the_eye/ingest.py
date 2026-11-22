@@ -44,18 +44,33 @@ def _run_cmd(cmd: list[str], *, label: str) -> None:
         raise RuntimeError(f"{label} failed (exit {proc.returncode}): {detail}")
 
 
+def _probe_duration_sec(video_path: Path) -> float:
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return 0.0
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+        return round(frames / fps, 2) if fps > 0 and frames > 0 else 0.0
+    finally:
+        cap.release()
+
+
 def prepare_media(
     source: str,
     *,
     work_dir: Path,
     start_sec: float = 0.0,
-    duration_sec: float = 45.0,
+    duration_sec: float = 0.0,
 ) -> PreparedMedia:
-    """Resolve a local file or YouTube URL into a cut MP4 clip and 16 kHz mono WAV audio."""
+    """Resolve a local file or YouTube URL into an MP4 clip (full video when duration<=0) & WAV."""
     ffmpeg_bin = _require_ffmpeg()
     work_dir.mkdir(parents=True, exist_ok=True)
     clip_path = work_dir / "excerpt.mp4"
     audio_path = work_dir / "audio.wav"
+    full_video = duration_sec <= 0.0
     end_sec = start_sec + duration_sec
     source_is_url = is_url(source)
 
@@ -63,53 +78,59 @@ def prepare_media(
         raw_download = work_dir / "downloaded.mp4"
         yt_dlp_bin = shutil.which("yt-dlp")
         yt_cmd_prefix = [yt_dlp_bin] if yt_dlp_bin else ["python", "-m", "yt_dlp"]
-        _run_cmd(
-            [
-                *yt_cmd_prefix,
-                "--no-playlist",
-                "--quiet",
-                "--no-warnings",
-                "-f",
-                "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]/best",
-                "--merge-output-format",
-                "mp4",
-                "--download-sections",
-                f"*{start_sec:.2f}-{end_sec:.2f}",
-                "--force-keyframes-at-cuts",
-                "-o",
-                str(raw_download),
-                source.strip(),
-            ],
-            label="yt-dlp download",
-        )
+        yt_cmd = [
+            *yt_cmd_prefix,
+            "--no-playlist",
+            "--quiet",
+            "--no-warnings",
+            "-f",
+            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]/best",
+            "--merge-output-format",
+            "mp4",
+        ]
+        if not full_video:
+            yt_cmd.extend(
+                [
+                    "--download-sections",
+                    f"*{start_sec:.2f}-{end_sec:.2f}",
+                    "--force-keyframes-at-cuts",
+                ]
+            )
+        yt_cmd.extend(["-o", str(raw_download), source.strip()])
+        _run_cmd(yt_cmd, label="yt-dlp download")
         if not raw_download.exists():
             matches = sorted(work_dir.glob("downloaded.*"))
             if not matches:
                 raise RuntimeError("yt-dlp completed but no video file was produced.")
             raw_download = matches[0]
 
-        # Normalize to exact duration & clean MP4 container
-        _run_cmd(
-            [
+        if full_video and raw_download.suffix.lower() == ".mp4" and start_sec <= 0.0:
+            shutil.copy2(raw_download, clip_path)
+        else:
+            ff_cmd = [
                 ffmpeg_bin,
                 "-hide_banner",
                 "-loglevel",
                 "error",
                 "-y",
-                "-i",
-                str(raw_download),
-                "-t",
-                f"{duration_sec:.3f}",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-c:a",
-                "aac",
-                str(clip_path),
-            ],
-            label="ffmpeg normalize",
-        )
+            ]
+            if start_sec > 0.0 and full_video:
+                ff_cmd.extend(["-ss", f"{start_sec:.3f}"])
+            ff_cmd.extend(["-i", str(raw_download)])
+            if not full_video:
+                ff_cmd.extend(["-t", f"{duration_sec:.3f}"])
+            ff_cmd.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-c:a",
+                    "aac",
+                    str(clip_path),
+                ]
+            )
+            _run_cmd(ff_cmd, label="ffmpeg normalize")
     else:
         local_path = Path(source).expanduser().resolve()
         if not local_path.exists():
@@ -119,8 +140,10 @@ def prepare_media(
                 f"Unsupported video format '{local_path.suffix}'. "
                 f"Supported: {', '.join(SUPPORTED_VIDEO_EXTS)}"
             )
-        _run_cmd(
-            [
+        if full_video and start_sec <= 0.0 and local_path.suffix.lower() == ".mp4":
+            shutil.copy2(local_path, clip_path)
+        else:
+            ff_cmd = [
                 ffmpeg_bin,
                 "-hide_banner",
                 "-loglevel",
@@ -130,14 +153,13 @@ def prepare_media(
                 f"{start_sec:.3f}",
                 "-i",
                 str(local_path),
-                "-t",
-                f"{duration_sec:.3f}",
-                "-c",
-                "copy",
-                str(clip_path),
-            ],
-            label="ffmpeg cut",
-        )
+            ]
+            if not full_video:
+                ff_cmd.extend(["-t", f"{duration_sec:.3f}"])
+            ff_cmd.extend(["-c", "copy", str(clip_path)])
+            _run_cmd(ff_cmd, label="ffmpeg cut")
+
+    actual_duration = _probe_duration_sec(clip_path) if full_video else duration_sec
 
     # Extract 16 kHz mono WAV for librosa combat audio analysis
     _run_cmd(
@@ -167,5 +189,5 @@ def prepare_media(
         is_url=source_is_url,
         source=source.strip(),
         start_sec=start_sec,
-        duration_sec=duration_sec,
+        duration_sec=actual_duration,
     )
