@@ -174,14 +174,20 @@ def analyze(
         f"Avg vertical jitter = {mechanics.avg_vertical_jitter:.2f} (lower is steadier)",
     )
     mc_table.add_row(
-        "Counter-Strafe Coord.",
+        "Active Counter-Strafe",
         f"{mechanics.counter_strafe_score:.1f}/100",
-        f"{mechanics.coordinated_shot_ratio * 100:.0f}% shots fired while stabilized",
+        f"Active={mechanics.active_counter_strafe_count} | "
+        f"Static={mechanics.stationary_shot_count} | Moving={mechanics.moving_shot_count}",
     )
     mc_table.add_row(
-        "Sound-Cue Awareness",
+        "Spray Control",
+        f"{mechanics.spray_control_score:.1f}/100",
+        f"Measured across {mechanics.spray_burst_count} sustained gunfire bursts",
+    )
+    mc_table.add_row(
+        "Sound & Flank Aware.",
         f"{mechanics.sound_awareness_score:.1f}/100",
-        f"Avg audio-to-aim reaction = {rx_str}",
+        f"Avg reaction = {rx_str} | Flank misses = {mechanics.flank_awareness_misses}",
     )
     mc_table.add_row(
         "Team & Utility Timing",
@@ -248,9 +254,16 @@ def compare(
         f"{mb.crosshair_discipline_score:.1f} (vJit={mb.avg_vertical_jitter:.2f})",
     )
     table.add_row(
-        "Counter-Strafe Coord.",
-        f"{ma.counter_strafe_score:.1f} ({ma.coordinated_shot_ratio * 100:.0f}%)",
-        f"{mb.counter_strafe_score:.1f} ({mb.coordinated_shot_ratio * 100:.0f}%)",
+        "Active Counter-Strafe",
+        f"{ma.counter_strafe_score:.1f} "
+        f"({ma.active_counter_strafe_count}/{ma.stationary_shot_count}/{ma.moving_shot_count})",
+        f"{mb.counter_strafe_score:.1f} "
+        f"({mb.active_counter_strafe_count}/{mb.stationary_shot_count}/{mb.moving_shot_count})",
+    )
+    table.add_row(
+        "Spray Control",
+        f"{ma.spray_control_score:.1f} ({ma.spray_burst_count} sprays)",
+        f"{mb.spray_control_score:.1f} ({mb.spray_burst_count} sprays)",
     )
     table.add_row(
         "Sound Awareness (Rx)",

@@ -66,32 +66,71 @@ def compute_mechanics_scorecard(
         avg_v_jitter = 0.0
         crosshair_score = 75.0
 
-    # 2. Counter-Strafe / Movement-to-Shooting Coordination
-    # Track both stabilized shots AND exact timestamps of uncoordinated moving shots!
+    # 2. Active Counter-Strafe / Movement-to-Shooting Coordination (3 buckets)
+    # Distinguishes active strafe-brake (1.0) vs static turret camping (0.6) vs run-and-gun (0.0).
     shot_indices = [i for i, m in enumerate(timeline) if m.audio_spike and not m.is_flashed]
-    coordinated_shots = 0
+    active_cs_count = 0
+    stationary_count = 0
+    moving_count = 0
+    stationary_ts: list[str] = []
     uncoordinated_ts: list[str] = []
+
     for idx in shot_indices:
         curr_flow = timeline[idx].flow_mag
         prev_flow = timeline[idx - 1].flow_mag if idx > 0 else curr_flow
-        # Stabilized at shot (<= 1.8 px/frame) OR decelerated by >= 25% into the shot
-        if curr_flow <= 1.8 or (prev_flow > 0.5 and curr_flow <= prev_flow * 0.75):
-            coordinated_shots += 1
+        ts_str = format_timestamp(timeline[idx].original_video_sec)
+        if prev_flow >= 1.2 and (curr_flow <= 1.8 or curr_flow <= prev_flow * 0.70):
+            active_cs_count += 1
+        elif prev_flow < 1.2 and curr_flow < 1.2:
+            stationary_count += 1
+            stationary_ts.append(ts_str)
         else:
-            uncoordinated_ts.append(format_timestamp(timeline[idx].original_video_sec))
+            moving_count += 1
+            uncoordinated_ts.append(ts_str)
+
     if shot_indices:
-        coord_ratio = coordinated_shots / len(shot_indices)
-        counter_strafe_score = round(coord_ratio * 100.0, 1)
+        weighted_cs = (active_cs_count * 1.0 + stationary_count * 0.6) / len(shot_indices)
+        coord_ratio = (active_cs_count + stationary_count) / len(shot_indices)
+        counter_strafe_score = round(weighted_cs * 100.0, 1)
     else:
         coord_ratio = 0.0
         counter_strafe_score = 70.0
+
+    # 2B. CS2 Spray Control Analysis (sustained >=2 consecutive gunfire spike frames)
+    spray_bursts: list[list[FrameMetrics]] = []
+    current_burst: list[FrameMetrics] = []
+    for m in timeline:
+        if m.audio_spike and not m.is_flashed:
+            current_burst.append(m)
+        else:
+            if len(current_burst) >= 2:
+                spray_bursts.append(current_burst)
+            current_burst = []
+    if len(current_burst) >= 2:
+        spray_bursts.append(current_burst)
+
+    spray_scores: list[float] = []
+    bad_spray_ts: list[str] = []
+    for burst in spray_bursts:
+        dys = np.array([f.flow_dy for f in burst], dtype=np.float64)
+        dxs = np.array([f.flow_dx for f in burst], dtype=np.float64)
+        # Controlled spray keeps cumulative vertical recoil drift and erratic variance bounded
+        v_drift = float(abs(np.mean(dys)))
+        v_var = float(np.std(dys))
+        h_var = float(np.std(dxs))
+        instability = v_drift * 1.4 + v_var * 1.2 + h_var * 0.6
+        b_score = max(15.0, min(100.0, 100.0 - instability * 22.0))
+        spray_scores.append(b_score)
+        if b_score < 68.0:
+            bad_spray_ts.append(format_timestamp(burst[0].original_video_sec))
+
+    spray_control_score = round(float(np.mean(spray_scores)), 1) if spray_scores else 75.0
 
     # Track worst vertical-jitter timestamps for timestamped crosshair drills
     worst_jitter_frames = sorted(active_flows, key=lambda m: m.vertical_jitter, reverse=True)[:3]
     worst_jitter_ts = [format_timestamp(m.original_video_sec) for m in worst_jitter_frames]
 
-    # 3. Sound-Cue Awareness & Reaction Time (Audio cue -> Aim flick within 0.15s..1.25s)
-    # Filter to non-peak-motion cues so self-recoil bursts don't inflate reaction stats
+    # 3. Sound-Cue Awareness, Reaction Time & Flank/Backstab Detection
     flow_mags = np.array([m.flow_mag for m in timeline], dtype=np.float64)
     flick_thresh = max(1.2, float(np.mean(flow_mags) + 0.8 * np.std(flow_mags)))
     max_lookahead_frames = max(2, int(round(1.25 * fps)))
@@ -114,13 +153,34 @@ def compute_mechanics_scorecard(
         else:
             missed_cue_ts.append(format_timestamp(timeline[idx].original_video_sec))
 
+    # Detect flank/backstab awareness misses: sudden damage/contact preceded by radar or audio cue
+    # with no pre-aim turn (low flow_dx) in the 0.5s..2.0s before contact
+    flank_miss_ts: list[str] = []
+    lookback_frames = max(2, int(round(2.0 * fps)))
+    for e in events:
+        if e.event_type not in (EventType.DAMAGE_TAKEN, EventType.KILLFEED_EVENT):
+            continue
+        e_idx = min(
+            range(len(timeline)),
+            key=lambda i: abs(timeline[i].timestamp_sec - e.timestamp_sec),
+        )
+        window = timeline[max(0, e_idx - lookback_frames) : e_idx]
+        if len(window) < 2:
+            continue
+        had_cue = any(w.audio_onset >= 1.5 or w.radar_motion >= 6.0 for w in window)
+        turned_to_cue = any(abs(w.flow_dx) >= 2.0 for w in window)
+        if had_cue and not turned_to_cue and timeline[e_idx].is_damaged:
+            flank_miss_ts.append(format_timestamp(e.original_video_sec))
+
     if shot_indices:
         response_rate = responded_cues / len(shot_indices)
         avg_rx_ms = round(float(np.mean(reaction_times_ms)), 1) if reaction_times_ms else None
         speed_bonus = 0.0
         if avg_rx_ms is not None:
             speed_bonus = max(0.0, min(25.0, (900.0 - avg_rx_ms) / 22.0))
-        sound_score = min(100.0, round(response_rate * 75.0 + speed_bonus, 1))
+        flank_penalty = min(20.0, len(flank_miss_ts) * 10.0)
+        raw_sound = round(response_rate * 75.0 + speed_bonus - flank_penalty, 1)
+        sound_score = max(10.0, min(100.0, raw_sound))
     else:
         avg_rx_ms = None
         sound_score = 65.0
@@ -155,8 +215,9 @@ def compute_mechanics_scorecard(
     damage_events = sum(1 for e in events if e.event_type == EventType.DAMAGE_TAKEN)
 
     overall = round(
-        0.35 * crosshair_score
-        + 0.35 * counter_strafe_score
+        0.25 * crosshair_score
+        + 0.25 * counter_strafe_score
+        + 0.20 * spray_control_score
         + 0.15 * sound_score
         + 0.15 * team_score,
         1,
@@ -170,22 +231,35 @@ def compute_mechanics_scorecard(
             f"Crosshair Placement{ts_ref} — vertical jitter={avg_v_jitter:.2f}: Keep crosshair "
             "locked at head level on horizontal pre-aim lines instead of dipping vertically."
         )
-    if counter_strafe_score < 70.0:
+    if moving_count > 0 and counter_strafe_score < 75.0:
         ts_ref = f" (check {', '.join(uncoordinated_ts[:3])})" if uncoordinated_ts else ""
         drills.append(
-            f"Counter-Strafing{ts_ref} — only {coord_ratio * 100:.0f}% stabilized shots: Tap "
-            "the opposite A/D key to zero velocity right before firing rifles."
+            f"Counter-Strafing{ts_ref} — {moving_count} moving run-and-gun shots: Tap the "
+            "opposite A/D key to zero velocity right before firing rifles."
         )
-    if sound_score < 65.0 or (avg_rx_ms is not None and avg_rx_ms > 550.0):
+    elif stationary_count >= 3 and active_cs_count == 0:
+        ts_ref = f" (check {', '.join(stationary_ts[:3])})" if stationary_ts else ""
+        drills.append(
+            f"Static Turret Shooting{ts_ref} — {stationary_count} shots fired while standing "
+            "completely still: Mix in active A/D strafe-peeks or crouch-spray transitions."
+        )
+    if spray_bursts and spray_control_score < 72.0:
+        ts_ref = f" (check {', '.join(bad_spray_ts[:3])})" if bad_spray_ts else ""
+        drills.append(
+            f"Spray Control{ts_ref} — score {spray_control_score:.1f}/100 across "
+            f"{len(spray_bursts)} sustained sprays: Pull down smoothly on bullets 3-8 to keep "
+            "vertical recoil flat instead of letting the crosshair kick upward."
+        )
+    if flank_miss_ts:
+        drills.append(
+            f"Flank & Radar Awareness (check {', '.join(flank_miss_ts[:3])}): Audio/radar "
+            "activity preceded damage with no pre-aim turn — glance at radar & react to flanks."
+        )
+    elif sound_score < 65.0 or (avg_rx_ms is not None and avg_rx_ms > 550.0):
         ts_ref = f" (check {', '.join(missed_cue_ts[:3])})" if missed_cue_ts else ""
         drills.append(
             f"Sound-Cue Reaction{ts_ref}: Pre-aim toward audio cues (footsteps, utility pins, "
             "off-angle shots) immediately before swinging."
-        )
-    if trade_windows == 0 and utility_entry_combos == 0:
-        drills.append(
-            "Team & Utility Timing: Swing within 1-3s of teammate flashes or contact so fights "
-            "convert into immediate kill trades rather than isolated 1v1s."
         )
     if not drills:
         drills.append(
@@ -198,8 +272,14 @@ def compute_mechanics_scorecard(
         avg_vertical_jitter=round(avg_v_jitter, 3),
         counter_strafe_score=round(counter_strafe_score, 1),
         coordinated_shot_ratio=round(coord_ratio, 3),
+        active_counter_strafe_count=active_cs_count,
+        stationary_shot_count=stationary_count,
+        moving_shot_count=moving_count,
+        spray_control_score=spray_control_score,
+        spray_burst_count=len(spray_bursts),
         sound_awareness_score=round(sound_score, 1),
         avg_reaction_time_ms=avg_rx_ms,
+        flank_awareness_misses=len(flank_miss_ts),
         team_coordination_score=round(team_score, 1),
         trade_window_count=trade_windows,
         utility_entry_combos=utility_entry_combos,

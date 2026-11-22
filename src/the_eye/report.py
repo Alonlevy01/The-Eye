@@ -108,11 +108,12 @@ def write_html_report(report: AnalysisReport, output_path: Path) -> Path:
 
     scorecard_html = "".join(
         [
-            _bar("Overall CS2 Mechanics", mc.overall_mechanics_score, "Weighted composite across crosshair, counter-strafe, sound & team timing"),
+            _bar("Overall CS2 Mechanics", mc.overall_mechanics_score, "Weighted composite across crosshair, active counter-strafe, spray control, sound & team timing"),
             _bar("Crosshair Discipline", mc.crosshair_discipline_score, f"Avg vertical jitter: {mc.avg_vertical_jitter:.2f} (lower = cleaner head-level clearing)"),
-            _bar("Counter-Strafe Coordination", mc.counter_strafe_score, f"{mc.coordinated_shot_ratio * 100:.0f}% of gunfire bursts fired while velocity stabilized"),
-            _bar("Sound-Cue Awareness", mc.sound_awareness_score, f"Avg audio-to-aim reaction: {rx_display}"),
-            _bar("Team & Utility Coordination", mc.team_coordination_score, f"Trade windows (<=4s): {mc.trade_window_count} · Flash-to-entry combos: {mc.utility_entry_combos} · Radar activity: {mc.radar_rotation_activity:.1f}"),
+            _bar("Active Counter-Strafe", mc.counter_strafe_score, f"Active strafe-brakes: {mc.active_counter_strafe_count} · Static shots: {mc.stationary_shot_count} · Moving shots: {mc.moving_shot_count}"),
+            _bar("Spray Control", mc.spray_control_score, f"Measured across {mc.spray_burst_count} sustained gunfire bursts (vertical recoil pull-down stability)"),
+            _bar("Sound & Flank Awareness", mc.sound_awareness_score, f"Avg audio-to-aim reaction: {rx_display} · Flank/radar misses: {mc.flank_awareness_misses}"),
+            _bar("Team & Utility Coordination", mc.team_coordination_score, f"Trade windows (<=4s): {mc.trade_window_count} · Flash-entry combos: {mc.utility_entry_combos} · Radar activity: {mc.radar_rotation_activity:.1f}"),
         ]
     )
 
@@ -251,8 +252,9 @@ def write_comparison_html(
     rows = [
         ("Overall CS2 Mechanics Score", f"{ma.overall_mechanics_score:.1f} / 100", f"{mb.overall_mechanics_score:.1f} / 100"),
         ("Crosshair Discipline (v-jitter)", f"{ma.crosshair_discipline_score:.1f} ({ma.avg_vertical_jitter:.2f})", f"{mb.crosshair_discipline_score:.1f} ({mb.avg_vertical_jitter:.2f})"),
-        ("Counter-Strafe Coordination", f"{ma.counter_strafe_score:.1f} ({ma.coordinated_shot_ratio * 100:.0f}%)", f"{mb.counter_strafe_score:.1f} ({mb.coordinated_shot_ratio * 100:.0f}%)"),
-        ("Sound-Cue Awareness (Avg Rx)", f"{ma.sound_awareness_score:.1f} ({rx_a})", f"{mb.sound_awareness_score:.1f} ({rx_b})"),
+        ("Counter-Strafe (Active/Static/Moving)", f"{ma.counter_strafe_score:.1f} ({ma.active_counter_strafe_count}/{ma.stationary_shot_count}/{ma.moving_shot_count})", f"{mb.counter_strafe_score:.1f} ({mb.active_counter_strafe_count}/{mb.stationary_shot_count}/{mb.moving_shot_count})"),
+        ("Spray Control (Bursts)", f"{ma.spray_control_score:.1f} ({ma.spray_burst_count} sprays)", f"{mb.spray_control_score:.1f} ({mb.spray_burst_count} sprays)"),
+        ("Sound & Flank Awareness", f"{ma.sound_awareness_score:.1f} ({rx_a}, flank_miss={ma.flank_awareness_misses})", f"{mb.sound_awareness_score:.1f} ({rx_b}, flank_miss={mb.flank_awareness_misses})"),
         ("Team & Utility Coordination", f"{ma.team_coordination_score:.1f} (trades={ma.trade_window_count}, util={ma.utility_entry_combos})", f"{mb.team_coordination_score:.1f} (trades={mb.trade_window_count}, util={mb.utility_entry_combos})"),
         ("Radar Rotation Activity", f"{ma.radar_rotation_activity:.1f}", f"{mb.radar_rotation_activity:.1f}"),
         ("Events / Minute", f"{sa.engagements_per_min:.2f}", f"{sb.engagements_per_min:.2f}"),

@@ -102,3 +102,53 @@ def test_pre_duel_filmstrip_stitching(tmp_path: Path) -> None:
     # 3 horizontal tiles of width 426 -> 1278px wide, 240 + 28 header -> 268px tall
     assert img.shape[1] == 1278
     assert img.shape[0] == 268
+
+
+def test_spray_control_static_turret_and_flank_awareness() -> None:
+    # Static turret player: low flow before & during sustained spray with wild vertical kick
+    # plus sudden flank damage after an audio/radar cue with zero horizontal turn
+    timeline = [
+        FrameMetrics(
+            frame_index=0, timestamp_sec=0.0, original_video_sec=10.0,
+            brightness=120, saturation=80, flow_dx=0.1, flow_dy=0.0, flow_mag=0.1,
+            audio_onset=2.5, radar_motion=8.0,
+        ),
+        FrameMetrics(
+            frame_index=1, timestamp_sec=0.25, original_video_sec=10.25,
+            brightness=120, saturation=80, flow_dx=0.0, flow_dy=0.0, flow_mag=0.0,
+            radar_motion=8.0,
+        ),
+        FrameMetrics(
+            frame_index=2, timestamp_sec=0.5, original_video_sec=10.5,
+            brightness=120, saturation=80, flow_dx=0.1, flow_dy=2.8, flow_mag=0.9,
+            is_damaged=True, damage_red_ratio=0.04, audio_rms=0.25, audio_spike=True,
+        ),
+        FrameMetrics(
+            frame_index=3, timestamp_sec=0.75, original_video_sec=10.75,
+            brightness=120, saturation=80, flow_dx=-0.4, flow_dy=3.4, flow_mag=0.9,
+            audio_rms=0.26, audio_spike=True,
+        ),
+        FrameMetrics(
+            frame_index=4, timestamp_sec=1.0, original_video_sec=11.0,
+            brightness=120, saturation=80, flow_dx=0.3, flow_dy=3.1, flow_mag=0.8,
+            audio_rms=0.24, audio_spike=True,
+        ),
+    ]
+    events = [
+        DetectedEvent(
+            event_id="E1", event_type=EventType.DAMAGE_TAKEN, timestamp_sec=0.5,
+            original_video_sec=10.5, confidence=0.88, visual_evidence="dmg", audio_evidence="shot",
+        )
+    ]
+
+    sc = compute_mechanics_scorecard(timeline, events, fps=4.0)
+    assert sc.active_counter_strafe_count == 0
+    assert sc.stationary_shot_count == 3
+    assert sc.counter_strafe_score == 60.0  # Static turret capped at 60, NOT 100!
+    assert sc.spray_burst_count == 1
+    assert sc.spray_control_score < 40.0  # Wild vertical kick caught!
+    assert sc.flank_awareness_misses == 1
+    assert any("Static Turret Shooting" in d for d in sc.improvement_drills)
+    assert any("Spray Control" in d for d in sc.improvement_drills)
+    assert any("Flank & Radar Awareness" in d for d in sc.improvement_drills)
+
