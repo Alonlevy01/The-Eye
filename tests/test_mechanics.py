@@ -159,3 +159,27 @@ def test_spray_control_static_turret_and_flank_awareness() -> None:
     assert sc_awp.spray_control_score == 85.0
 
 
+def test_mistakes_cluster_into_single_duel_card() -> None:
+    # 5 moving shots within 1.5 seconds should collapse into 1 Duel card saying "5 moving shots"
+    timeline = [
+        FrameMetrics(
+            frame_index=i,
+            timestamp_sec=10.0 + i * 0.25,
+            original_video_sec=10.0 + i * 0.25,
+            brightness=120,
+            saturation=80,
+            flow_dx=3.5,
+            flow_dy=0.2,
+            flow_mag=3.5,
+            audio_rms=0.25,
+            audio_spike=True,
+        )
+        for i in range(5)
+    ]
+    sc = compute_mechanics_scorecard(timeline, [], fps=4.0, weapon="ak47")
+    assert len(sc.mistakes) == 1
+    assert "5 moving shots" in sc.mistakes[0].summary
+    assert sc.mistakes[0].timestamp_sec == 9.5  # 0.5s lead-in before duel start
+
+
+

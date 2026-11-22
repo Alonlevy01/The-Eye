@@ -52,11 +52,17 @@ def detect_fused_events(
 
     events: list[DetectedEvent] = []
     last_event_ts: dict[EventType, float] = {}
-    cooldown_sec = 2.0
+    cooldown_map: dict[EventType, float] = {
+        EventType.FLASHBANG: 3.0,
+        EventType.KILLFEED_EVENT: 3.5,
+        EventType.DAMAGE_TAKEN: 3.0,
+        EventType.SCOPED_DUEL: 4.0,
+        EventType.COMBAT_BURST: 3.5,
+    }
 
     def _can_emit(etype: EventType, ts: float) -> bool:
         prev = last_event_ts.get(etype)
-        return prev is None or (ts - prev) >= cooldown_sec
+        return prev is None or (ts - prev) >= cooldown_map.get(etype, 3.0)
 
     if keyframes_dir is not None:
         keyframes_dir.mkdir(parents=True, exist_ok=True)
@@ -83,10 +89,18 @@ def detect_fused_events(
                 f"saturation={m.saturation:.1f}/255)."
             )
 
-        # Priority 2: Killfeed event
+        # Priority 2: Player-involved Killfeed event
+        # Red border = player kill/death; otherwise require local combat audio/motion so
+        # off-site kills while dead or on the other bombsite are filtered out.
         elif (
             not m.is_flashed
-            and (m.killfeed_red_ratio >= 0.008 or m.killfeed_delta >= kf_thresh)
+            and (
+                m.killfeed_red_ratio >= 0.008
+                or (
+                    m.killfeed_delta >= kf_thresh
+                    and (m.audio_spike or m.center_motion >= motion_thresh * 0.75)
+                )
+            )
             and _can_emit(EventType.KILLFEED_EVENT, m.timestamp_sec)
         ):
             etype = EventType.KILLFEED_EVENT

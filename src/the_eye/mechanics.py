@@ -279,11 +279,10 @@ def compute_mechanics_scorecard(
             "filmstrips to refine off-angle spacing and utility timing."
         )
 
-    # Build structured clickable MistakeItems for the interactive video player UI
-    mistakes: list[MistakeItem] = []
+    # Collect raw per-frame mistakes, then cluster nearby mistakes (<=6.0s) into ONE Duel card!
+    raw_mistakes: list[tuple[float, float, str, str, str]] = []
+    # Tuple: (clip_ts, orig_ts, kind, severity, fix_tip)
     for idx in shot_indices:
-        if len(mistakes) >= 6:
-            break
         m_shot = timeline[idx]
         prev_flow = timeline[idx - 1].flow_mag if idx > 0 else m_shot.flow_mag
         is_active_cs = prev_flow >= 1.2 and (
@@ -291,57 +290,104 @@ def compute_mechanics_scorecard(
         )
         if not is_active_cs:
             if prev_flow < 1.2 and m_shot.flow_mag < 1.2:
-                if stationary_count >= 3 and active_cs_count == 0 and len(mistakes) < 2:
-                    mistakes.append(
-                        MistakeItem(
-                            category="Static Turret Shot",
-                            severity="medium",
-                            timestamp_sec=m_shot.timestamp_sec,
-                            original_video_sec=m_shot.original_video_sec,
-                            summary="Fired while standing completely still (easy target).",
-                            how_to_fix=(
-                                "Add a quick A/D counter-strafe peek or crouch-spray transition."
-                            ),
+                if stationary_count >= 3 and active_cs_count == 0:
+                    raw_mistakes.append(
+                        (
+                            m_shot.timestamp_sec,
+                            m_shot.original_video_sec,
+                            "static_shot",
+                            "medium",
+                            "Mix in active A/D strafe-peeks or crouch-spray transitions.",
                         )
                     )
             else:
-                mistakes.append(
-                    MistakeItem(
-                        category="Moving Shot (Counter-Strafe)",
-                        severity="high",
-                        timestamp_sec=m_shot.timestamp_sec,
-                        original_video_sec=m_shot.original_video_sec,
-                        summary=f"Fired while still moving (flow={m_shot.flow_mag:.1f}).",
-                        how_to_fix="Tap the opposite A/D key to stop velocity right before firing.",
+                raw_mistakes.append(
+                    (
+                        m_shot.timestamp_sec,
+                        m_shot.original_video_sec,
+                        "moving_shot",
+                        "high",
+                        "Tap the opposite A/D key to stop velocity right before firing.",
                     )
                 )
 
-    for bf in bad_spray_frames[:2]:
-        mistakes.append(
-            MistakeItem(
-                category=f"Spray Control ({wp.display_name})",
-                severity="high",
-                timestamp_sec=bf.timestamp_sec,
-                original_video_sec=bf.original_video_sec,
-                summary="Uncontrolled vertical recoil drift during sustained spray.",
-                how_to_fix=wp.spray_tip,
+    for bf in bad_spray_frames:
+        raw_mistakes.append(
+            (
+                bf.timestamp_sec,
+                bf.original_video_sec,
+                "bad_spray",
+                "high",
+                wp.spray_tip,
             )
         )
 
     if crosshair_score < 72.0:
-        for jf in worst_jitter_frames[:2]:
-            mistakes.append(
-                MistakeItem(
-                    category="Crosshair Height Drift",
-                    severity="medium",
-                    timestamp_sec=jf.timestamp_sec,
-                    original_video_sec=jf.original_video_sec,
-                    summary=f"Vertical aim bounce (vJit={jf.vertical_jitter:.2f}) while clearing.",
-                    how_to_fix="Lock crosshair on the horizontal head-level line between angles.",
+        for jf in worst_jitter_frames:
+            raw_mistakes.append(
+                (
+                    jf.timestamp_sec,
+                    jf.original_video_sec,
+                    "crosshair_drift",
+                    "medium",
+                    "Lock crosshair on the horizontal head-level line between angles.",
                 )
             )
 
-    mistakes.sort(key=lambda item: item.timestamp_sec)
+    raw_mistakes.sort(key=lambda r: r[0])
+
+    # Cluster mistakes within 6.0s into a single Duel Review Card pointing to the duel start
+    clusters: list[list[tuple[float, float, str, str, str]]] = []
+    for item in raw_mistakes:
+        if clusters and (item[0] - clusters[-1][-1][0]) <= 6.0:
+            clusters[-1].append(item)
+        else:
+            clusters.append([item])
+
+    mistakes: list[MistakeItem] = []
+    for c_idx, cluster in enumerate(clusters, start=1):
+        start_clip = max(0.0, cluster[0][0] - 0.5)
+        start_orig = max(0.0, cluster[0][1] - 0.5)
+        counts: dict[str, int] = {}
+        fixes: list[str] = []
+        severity = "medium"
+        for _, _, kind, sev, fix_tip in cluster:
+            counts[kind] = counts.get(kind, 0) + 1
+            if sev == "high":
+                severity = "high"
+            if fix_tip not in fixes:
+                fixes.append(fix_tip)
+
+        parts: list[str] = []
+        if counts.get("moving_shot"):
+            n = counts["moving_shot"]
+            parts.append(f"{n} moving shot{'s' if n != 1 else ''} during this duel (bad strafe)")
+        if counts.get("bad_spray"):
+            n = counts["bad_spray"]
+            parts.append(
+                f"{n} uncontrolled {wp.display_name} spray burst{'s' if n != 1 else ''}"
+            )
+        if counts.get("static_shot"):
+            n = counts["static_shot"]
+            parts.append(f"{n} static turret shot{'s' if n != 1 else ''} (standing still)")
+        if counts.get("crosshair_drift"):
+            n = counts["crosshair_drift"]
+            parts.append(f"{n} vertical crosshair height drift{'s' if n != 1 else ''}")
+
+        mistakes.append(
+            MistakeItem(
+                category=f"Duel #{c_idx} Breakdown",
+                severity=severity,
+                timestamp_sec=round(start_clip, 2),
+                original_video_sec=round(start_orig, 2),
+                summary="; ".join(parts).capitalize() + ".",
+                how_to_fix=" ".join(fixes[:2]),
+            )
+        )
+
+    # Keep top 8 highest-impact duels so long 15-minute matches stay clean & scannable
+    mistakes.sort(key=lambda m: (0 if m.severity == "high" else 1, m.timestamp_sec))
+    mistakes = sorted(mistakes[:8], key=lambda m: m.timestamp_sec)
 
     return MechanicsScorecard(
         weapon_profile=wp.key,
