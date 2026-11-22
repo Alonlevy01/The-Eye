@@ -68,6 +68,14 @@ def analyze(
         str | None,
         typer.Option("--model", "-m", help="Override VLM model (e.g. ollama:qwen3.5:9b)."),
     ] = None,
+    weapon: Annotated[
+        str,
+        typer.Option(
+            "--weapon",
+            "-w",
+            help="Primary weapon recoil profile: auto, ak47, m4a4, m4a1s, galil, mp9, awp, deagle.",
+        ),
+    ] = "auto",
     no_vlm: Annotated[
         bool,
         typer.Option("--no-vlm", help="Skip VLM coaching and run pure OpenCV + librosa analysis."),
@@ -114,7 +122,17 @@ def analyze(
                 sampled,
                 fps=fps,
                 keyframes_dir=keyframes_dir,
+                weapon=weapon,
             )
+        # Always save cut clip.mp4 alongside report.html so HTML5 <video> plays offline
+        # with frame-accurate seeking and zero YouTube file:/// embed Error 153.
+        local_clip_rel: str | None = None
+        if media.clip_path.exists():
+            import shutil
+
+            saved_clip = target_dir / "clip.mp4"
+            shutil.copy2(media.clip_path, saved_clip)
+            local_clip_rel = "clip.mp4"
 
     vlm_model_used: str | None = None
     vlm_summary: str | None = None
@@ -150,6 +168,7 @@ def analyze(
         timeline=[sf.metrics for sf in sampled],
         vlm_model=vlm_model_used,
         vlm_tactical_summary=vlm_summary,
+        local_clip_path=local_clip_rel,
     )
 
     json_path = target_dir / "report.json"

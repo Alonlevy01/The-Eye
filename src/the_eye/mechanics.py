@@ -14,8 +14,10 @@ from the_eye.schemas import (
     EventType,
     FrameMetrics,
     MechanicsScorecard,
+    MistakeItem,
     format_timestamp,
 )
+from the_eye.weapons import get_weapon_profile
 
 
 def compute_optical_flow_metrics(
@@ -51,10 +53,16 @@ def compute_mechanics_scorecard(
     events: list[DetectedEvent],
     *,
     fps: float = 4.0,
+    weapon: str = "auto",
 ) -> MechanicsScorecard:
     """Derive CS2-specific mechanical and team-coordination scores from frame + audio telemetry."""
+    wp = get_weapon_profile(weapon)
     if not timeline:
-        return MechanicsScorecard()
+        return MechanicsScorecard(
+            weapon_profile=wp.key,
+            weapon_display_name=wp.display_name,
+            weapon_recoil_tip=wp.spray_tip,
+        )
 
     # 1. Crosshair Discipline (head-level horizontal stability vs vertical bounce)
     active_flows = [m for m in timeline if not m.is_flashed and m.flow_mag >= 0.4]
@@ -96,7 +104,7 @@ def compute_mechanics_scorecard(
         coord_ratio = 0.0
         counter_strafe_score = 70.0
 
-    # 2B. CS2 Spray Control Analysis (sustained >=2 consecutive gunfire spike frames)
+    # 2B. Weapon-Aware CS2 Spray Control Analysis (>=2 consecutive gunfire spike frames)
     spray_bursts: list[list[FrameMetrics]] = []
     current_burst: list[FrameMetrics] = []
     for m in timeline:
@@ -110,21 +118,25 @@ def compute_mechanics_scorecard(
         spray_bursts.append(current_burst)
 
     spray_scores: list[float] = []
-    bad_spray_ts: list[str] = []
-    for burst in spray_bursts:
-        dys = np.array([f.flow_dy for f in burst], dtype=np.float64)
-        dxs = np.array([f.flow_dx for f in burst], dtype=np.float64)
-        # Controlled spray keeps cumulative vertical recoil drift and erratic variance bounded
-        v_drift = float(abs(np.mean(dys)))
-        v_var = float(np.std(dys))
-        h_var = float(np.std(dxs))
-        instability = v_drift * 1.4 + v_var * 1.2 + h_var * 0.6
-        b_score = max(15.0, min(100.0, 100.0 - instability * 22.0))
-        spray_scores.append(b_score)
-        if b_score < 68.0:
-            bad_spray_ts.append(format_timestamp(burst[0].original_video_sec))
-
-    spray_control_score = round(float(np.mean(spray_scores)), 1) if spray_scores else 75.0
+    bad_spray_frames: list[FrameMetrics] = []
+    if not wp.sprayable:
+        # Single-shot weapons (AWP, Deagle) aren't spray-penalized
+        spray_control_score = 85.0
+    else:
+        for burst in spray_bursts:
+            dys = np.array([f.flow_dy for f in burst], dtype=np.float64)
+            dxs = np.array([f.flow_dx for f in burst], dtype=np.float64)
+            # Excess vertical drift beyond weapon's expected recoil pull-down profile
+            v_drift = max(0.0, float(abs(np.mean(dys))) - wp.expected_pulldown * 0.35)
+            v_var = float(np.std(dys))
+            h_excess = max(0.0, float(np.std(dxs)) - wp.expected_h_tolerance * 0.4)
+            instability = v_drift * 1.4 + v_var * 1.2 + h_excess * 0.8
+            b_score = max(15.0, min(100.0, 100.0 - instability * 22.0))
+            spray_scores.append(b_score)
+            if b_score < 68.0:
+                bad_spray_frames.append(burst[0])
+        spray_control_score = round(float(np.mean(spray_scores)), 1) if spray_scores else 75.0
+    bad_spray_ts = [format_timestamp(f.original_video_sec) for f in bad_spray_frames]
 
     # Track worst vertical-jitter timestamps for timestamped crosshair drills
     worst_jitter_frames = sorted(active_flows, key=lambda m: m.vertical_jitter, reverse=True)[:3]
@@ -267,7 +279,74 @@ def compute_mechanics_scorecard(
             "filmstrips to refine off-angle spacing and utility timing."
         )
 
+    # Build structured clickable MistakeItems for the interactive video player UI
+    mistakes: list[MistakeItem] = []
+    for idx in shot_indices:
+        if len(mistakes) >= 6:
+            break
+        m_shot = timeline[idx]
+        prev_flow = timeline[idx - 1].flow_mag if idx > 0 else m_shot.flow_mag
+        is_active_cs = prev_flow >= 1.2 and (
+            m_shot.flow_mag <= 1.8 or m_shot.flow_mag <= prev_flow * 0.7
+        )
+        if not is_active_cs:
+            if prev_flow < 1.2 and m_shot.flow_mag < 1.2:
+                if stationary_count >= 3 and active_cs_count == 0 and len(mistakes) < 2:
+                    mistakes.append(
+                        MistakeItem(
+                            category="Static Turret Shot",
+                            severity="medium",
+                            timestamp_sec=m_shot.timestamp_sec,
+                            original_video_sec=m_shot.original_video_sec,
+                            summary="Fired while standing completely still (easy target).",
+                            how_to_fix=(
+                                "Add a quick A/D counter-strafe peek or crouch-spray transition."
+                            ),
+                        )
+                    )
+            else:
+                mistakes.append(
+                    MistakeItem(
+                        category="Moving Shot (Counter-Strafe)",
+                        severity="high",
+                        timestamp_sec=m_shot.timestamp_sec,
+                        original_video_sec=m_shot.original_video_sec,
+                        summary=f"Fired while still moving (flow={m_shot.flow_mag:.1f}).",
+                        how_to_fix="Tap the opposite A/D key to stop velocity right before firing.",
+                    )
+                )
+
+    for bf in bad_spray_frames[:2]:
+        mistakes.append(
+            MistakeItem(
+                category=f"Spray Control ({wp.display_name})",
+                severity="high",
+                timestamp_sec=bf.timestamp_sec,
+                original_video_sec=bf.original_video_sec,
+                summary="Uncontrolled vertical recoil drift during sustained spray.",
+                how_to_fix=wp.spray_tip,
+            )
+        )
+
+    if crosshair_score < 72.0:
+        for jf in worst_jitter_frames[:2]:
+            mistakes.append(
+                MistakeItem(
+                    category="Crosshair Height Drift",
+                    severity="medium",
+                    timestamp_sec=jf.timestamp_sec,
+                    original_video_sec=jf.original_video_sec,
+                    summary=f"Vertical aim bounce (vJit={jf.vertical_jitter:.2f}) while clearing.",
+                    how_to_fix="Lock crosshair on the horizontal head-level line between angles.",
+                )
+            )
+
+    mistakes.sort(key=lambda item: item.timestamp_sec)
+
     return MechanicsScorecard(
+        weapon_profile=wp.key,
+        weapon_display_name=wp.display_name,
+        weapon_recoil_tip=wp.spray_tip,
         crosshair_discipline_score=round(crosshair_score, 1),
         avg_vertical_jitter=round(avg_v_jitter, 3),
         counter_strafe_score=round(counter_strafe_score, 1),
@@ -286,6 +365,7 @@ def compute_mechanics_scorecard(
         radar_rotation_activity=radar_activity,
         damage_events=damage_events,
         overall_mechanics_score=overall,
+        mistakes=mistakes,
         improvement_drills=drills,
     )
 

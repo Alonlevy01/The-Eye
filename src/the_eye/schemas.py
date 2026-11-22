@@ -58,9 +58,23 @@ class DetectedEvent(BaseModel):
     vlm_observation: str | None = None
 
 
+class MistakeItem(BaseModel):
+    """One concrete, timestamped CS2 gameplay mistake with an actionable fix."""
+
+    category: str
+    severity: str = "medium"  # "high" | "medium" | "low"
+    timestamp_sec: float = Field(ge=0.0)
+    original_video_sec: float = Field(ge=0.0)
+    summary: str
+    how_to_fix: str
+
+
 class MechanicsScorecard(BaseModel):
     """CS2-specific mechanical & tactical coaching metrics derived from video + audio."""
 
+    weapon_profile: str = "auto"
+    weapon_display_name: str = "Rifle (Auto)"
+    weapon_recoil_tip: str = ""
     crosshair_discipline_score: float = Field(default=0.0, ge=0.0, le=100.0)
     avg_vertical_jitter: float = Field(default=0.0, ge=0.0, le=1.0)
     counter_strafe_score: float = Field(default=0.0, ge=0.0, le=100.0)
@@ -79,6 +93,7 @@ class MechanicsScorecard(BaseModel):
     radar_rotation_activity: float = Field(default=0.0, ge=0.0)
     damage_events: int = Field(default=0, ge=0)
     overall_mechanics_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    mistakes: list[MistakeItem] = Field(default_factory=list)
     improvement_drills: list[str] = Field(default_factory=list)
 
 
@@ -115,6 +130,7 @@ class AnalysisReport(BaseModel):
     timeline: list[FrameMetrics] = Field(default_factory=list)
     vlm_model: str | None = None
     vlm_tactical_summary: str | None = None
+    local_clip_path: str | None = None
 
 
 def format_timestamp(seconds: float) -> str:

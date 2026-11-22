@@ -151,4 +151,11 @@ def test_spray_control_static_turret_and_flank_awareness() -> None:
     assert any("Static Turret Shooting" in d for d in sc.improvement_drills)
     assert any("Spray Control" in d for d in sc.improvement_drills)
     assert any("Flank & Radar Awareness" in d for d in sc.improvement_drills)
+    assert len(sc.mistakes) >= 1
+
+    # Single-shot weapon (AWP) should not be spray-penalized
+    sc_awp = compute_mechanics_scorecard(timeline, events, fps=4.0, weapon="awp")
+    assert sc_awp.weapon_profile == "awp"
+    assert sc_awp.spray_control_score == 85.0
+
 

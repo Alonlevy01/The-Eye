@@ -17,7 +17,8 @@ def detect_fused_events(
     *,
     fps: float = 4.0,
     keyframes_dir: Path | None = None,
-    max_keyframes: int = 8,
+    max_keyframes: int = 12,
+    weapon: str = "auto",
 ) -> tuple[list[DetectedEvent], ClipSummary, MechanicsScorecard]:
     """Fuse CS2 visual + audio signals into events, filmstrips, summary, and mechanics scorecard."""
     if not sampled_frames:
@@ -194,5 +195,5 @@ def detect_fused_events(
         audio_spike_count=audio_spikes,
         avg_center_motion=round(float(np.mean(motions)), 2),
     )
-    mechanics = compute_mechanics_scorecard(timeline, events, fps=fps)
+    mechanics = compute_mechanics_scorecard(timeline, events, fps=fps, weapon=weapon)
     return events, summary, mechanics
