@@ -14,9 +14,9 @@ import httpx
 from the_eye.config import Settings
 from the_eye.schemas import BTD6Scorecard, ClipSummary, DetectedEvent, format_timestamp
 
-VLM_SYSTEM_PROMPT = """You are a veteran Bloons TD 6 (BTD6) CHIMPS strategist reviewing 3-frame
-gameplay filmstrips (1. BEFORE -1.5s | 2. MOMENT 0.0s | 3. AFTER +1.0s) paired with HUD-verified
-Round, Cash ($), Lives, and Observed Towers.
+VLM_SYSTEM_PROMPT = """You are a veteran Bloons TD 6 (BTD6) coach reviewing 3-frame
+gameplay filmstrips paired with HUD-verified Game Mode, Map, Hero, Round, Cash ($), Lives,
+Observed Towers, Upgrades, and Early-Game Audit.
 
 Return STRICT JSON ONLY (no markdown fences, no extra prose):
 {
@@ -24,14 +24,15 @@ Return STRICT JSON ONLY (no markdown fences, no extra prose):
     "E1": "1-2 concise sentences evaluating the tower placement, upgrade timing, or round threat.",
     "E2": "..."
   },
-  "tactical_summary": "3-4 actionable BTD6 strategy takeaways (placement synergy, eco vs defense,
-   and preparing for upcoming killer rounds like R40/R63/R90)."
+  "tactical_summary": "3-4 concise, mode-aware BTD6 coaching takeaways connecting early-game
+   choices to the final outcome and giving concrete upgrade solutions."
 }
 
 RULES:
-1. Reference ONLY towers, upgrades, and HUD numbers actually visible in the frames or stats.
-2. Focus on real BTD6 strategy (tower range/synergy, Alch-buff placement, Camo/Lead/MOAB prep).
-3. Keep every tip clear and useful for a BTD6 player."""
+1. RESPECT THE GAME MODE RULES: never suggest Banana Farms or income in CHIMPS or Deflation;
+   never criticize Deflation R31 starting cash as hoarding; adapt to Alternate Bloons Rounds.
+2. Reference ONLY towers, heroes, upgrades, and HUD numbers actually visible in the frames or stats.
+3. Explain WHY the player won, leaked, or lost, and name specific BTD6 upgrade paths to improve."""
 
 
 def encode_image_base64_jpeg(image_path: Path, *, max_width: int = 960) -> str:
@@ -88,11 +89,20 @@ def build_vlm_messages(
     if scorecard is not None:
         meta_lines.append(
             f"HUD-Verified BTD6 Stats: mode={scorecard.game_mode}, "
+            f"outcome={scorecard.outcome}, map={scorecard.map_name or 'unknown'}, "
+            f"hero={scorecard.hero_used or 'none spotted'}, "
             f"rounds=R{scorecard.start_round}-R{scorecard.end_round}, "
             f"lives_lost={scorecard.lives_lost}, spent=${scorecard.total_cash_spent:,}, "
             f"towers={', '.join(scorecard.towers_observed) or 'n/a'}, "
+            f"upgrades={', '.join(scorecard.upgrades_detected) or 'n/a'}, "
             f"killer_rounds={', '.join(scorecard.killer_rounds_seen) or 'none'}."
         )
+        if scorecard.mode_rules_note:
+            meta_lines.append(f"Mode Rules: {scorecard.mode_rules_note}")
+        if scorecard.early_game_summary:
+            meta_lines.append(f"Early-Game Audit: {scorecard.early_game_summary}")
+        if scorecard.root_cause_headline:
+            meta_lines.append(f"Investigation Verdict: {scorecard.root_cause_headline}")
 
     meta_lines.append("Selected BTD6 moments to review:")
     for e, _ in chosen:

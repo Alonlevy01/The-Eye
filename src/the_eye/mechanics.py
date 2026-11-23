@@ -7,7 +7,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from the_eye.btd6_wiki import KILLER_ROUNDS, TOWER_ROLES
+from the_eye.btd6_wiki import (
+    HERO_NAMES,
+    KILLER_ROUNDS,
+    TOWER_ROLES,
+    detect_map_name,
+    mode_rules_summary,
+    recommend_affordable_counters,
+)
 from the_eye.schemas import (
     BTD6Scorecard,
     DetectedEvent,
@@ -18,13 +25,144 @@ from the_eye.schemas import (
 )
 
 
+def _format_affordable_fix(threat_tags: tuple[str, ...], cash: int | None) -> str:
+    """Format exact Bloons Wiki counter towers & costs matched to the player's actual cash."""
+    sols = recommend_affordable_counters(threat_tags, cash, limit=2)
+    parts = [f"{s.tower_path} ({s.upgrade_name}, ~${s.approx_cost:,})" for s in sols]
+    if cash is not None and sols and sols[0].approx_cost <= cash:
+        return f"Affordable with your ${cash:,} bank: " + " OR ".join(parts) + "."
+    return "Target Wiki counters: " + " OR ".join(parts) + "."
+
+
+def _trace_preceding_spend_drought(
+    purchase_events: list[DetectedEvent],
+    target_round: int | None,
+    target_ts: float,
+) -> str:
+    """Investigate how long before a leak/defeat the player stopped investing cash."""
+    prior = [e for e in purchase_events if e.timestamp_sec < target_ts]
+    if not prior:
+        return "No tower upgrades were purchased earlier in this segment before this wave hit."
+    last_buy = prior[-1]
+    gap_sec = max(0.0, target_ts - last_buy.timestamp_sec)
+    if target_round is not None and last_buy.round_num is not None:
+        r_gap = max(0, target_round - last_buy.round_num)
+        if r_gap >= 4:
+            return (
+                f"Stopped buying upgrades for {r_gap} rounds (last spend on R{last_buy.round_num}, "
+                f"{gap_sec:.0f}s earlier), leaving your defense stagnant into R{target_round}."
+            )
+    return (
+        f"Last upgrade was on R{last_buy.round_num or '?'} ({gap_sec:.0f}s earlier); "
+        "recent spend did not add enough pierce/type coverage for this wave."
+    )
+
+
+def build_early_game_and_root_cause(
+    timeline: list[FrameMetrics],
+    events: list[DetectedEvent],
+    scorecard: BTD6Scorecard,
+) -> tuple[str, str]:
+    """Investigate R1-R25 opening decisions and connect them to the final match outcome."""
+    valid = [m for m in timeline if m.cash is not None or m.round_num is not None]
+    if not valid:
+        return "", ""
+
+    early_frames = [m for m in valid if m.round_num is not None and m.round_num <= 25]
+    purchases = [e for e in events if e.event_type == EventType.TOWER_PURCHASE]
+    early_buys = [e for e in purchases if e.round_num is not None and e.round_num <= 25]
+    early_towers: list[str] = []
+    for m in early_frames:
+        if m.selected_tower and m.selected_tower not in early_towers:
+            early_towers.append(m.selected_tower)
+
+    early_spent = sum(abs(m.cash_delta) for m in early_frames if m.cash_delta <= -100)
+    early_cashes = [m.cash for m in early_frames if m.cash is not None]
+    avg_early_cash = float(np.mean(early_cashes)) if early_cashes else 0.0
+    early_leaks = sum(abs(m.lives_delta) for m in early_frames if m.lives_delta < 0)
+
+    heroes = {
+        "Sauda",
+        "Quincy",
+        "Obyn",
+        "Benjamin",
+        "Etienne",
+        "Geraldo",
+        "Psi",
+        "Adora",
+        "Pat Fusty",
+    }
+    hero_early = next((t for t in early_towers if t in heroes), None)
+    farm_early = "Banana Farm" in early_towers
+
+    early_parts: list[str] = []
+    if early_frames:
+        r0 = early_frames[0].round_num or 1
+        r1 = early_frames[-1].round_num or 25
+        early_parts.append(
+            f"R{r0}–R{r1}: Invested ${early_spent:,} across {len(early_buys)} early purchases "
+            f"(avg bank ${avg_early_cash:,.0f})."
+        )
+        if hero_early:
+            early_parts.append(f"Early Hero spotted ({hero_early}) — good XP snowball.")
+        else:
+            early_parts.append(
+                "No early Hero panel spotted in R1–R25 (delays late-game hero levels)."
+            )
+        if farm_early:
+            early_parts.append("Early Banana Farm eco started before R25.")
+        if early_leaks > 0:
+            early_parts.append(f"Leaked {early_leaks} lives before R25 (early defense too greedy).")
+    else:
+        early_parts.append(
+            f"Clip begins at R{scorecard.start_round or '?'} (post-opening); "
+            f"midgame spend was ${scorecard.total_cash_spent:,}."
+        )
+    early_summary = " ".join(early_parts)
+
+    # Connect early/midgame economy directly to final outcome
+    if "Defeat" in scorecard.outcome:
+        last_m = next((m for m in reversed(valid) if m.cash is not None), valid[-1])
+        drought = _trace_preceding_spend_drought(
+            purchases, scorecard.end_round, last_m.timestamp_sec
+        )
+        c_str = f"${last_m.cash:,}" if last_m.cash is not None else "$?"
+        end_r = scorecard.end_round or "?"
+        headline = (
+            f"Why You Lost (R{end_r}): {drought} "
+            f"You died holding {c_str} unspent cash instead of buying a cheap R{end_r} counter."
+        )
+    elif scorecard.lives_lost > 0:
+        first_leak = next((e for e in events if e.event_type == EventType.BLOON_LEAK), None)
+        if first_leak:
+            drought = _trace_preceding_spend_drought(
+                purchases, first_leak.round_num, first_leak.timestamp_sec
+            )
+            headline = (
+                f"Survived with {scorecard.lives_lost} Lives Lost: First leak hit on "
+                f"R{first_leak.round_num or '?'}. {drought}"
+            )
+        else:
+            headline = (
+                f"Victory with {scorecard.lives_lost} lives leaked — tighten midgame upgrades."
+            )
+    else:
+        headline = (
+            f"Clean Zero-Leak {scorecard.outcome}: Invested ${scorecard.total_cash_spent:,} across "
+            f"{scorecard.purchase_count} upgrades with solid checkpoint timing."
+        )
+
+    return early_summary, headline
+
+
 def compute_btd6_scorecard(
     timeline: list[FrameMetrics],
     events: list[DetectedEvent],
     *,
     fps: float = 2.0,
+    title: str = "",
 ) -> BTD6Scorecard:
-    """Compute HUD-verified BTD6 economy, leak, tower coverage, and wiki checkpoint scores."""
+    """Compute mode-aware, HUD-verified BTD6 economy, leak, hero, map & wiki scorecard."""
     valid = [m for m in timeline if m.cash is not None or m.round_num is not None]
     if not valid:
         return BTD6Scorecard()
@@ -43,11 +181,39 @@ def compute_btd6_scorecard(
         else 0
     )
 
+    total_spent = sum(abs(m.cash_delta) for m in valid if m.cash_delta <= -100)
+    total_earned = sum(m.cash_delta for m in valid if m.cash_delta > 0)
+    lives_lost = sum(abs(m.lives_delta) for m in valid if m.lives_delta < 0)
+    avg_cash = round(float(np.mean(cashes)), 1) if cashes else 0.0
+    peak_cash = max(cashes) if cashes else 0
+
+    low_title = title.lower()
     max_r = max_rounds[-1] if max_rounds else None
-    if max_r == 100 and lives_list and min(lives_list) == 1 and max(lives_list) == 1:
+    is_deflation = (
+        "deflation" in low_title
+        or (
+            start_round is not None
+            and 30 <= start_round <= 32
+            and max_r == 60
+            and peak_cash >= 18_000
+        )
+    )
+    is_abr = "alternate" in low_title or " abr" in low_title or "[abr]" in low_title
+    is_chimps = (
+        "chimps" in low_title
+        or (max_r == 100 and bool(lives_list) and min(lives_list) <= 1 and max(lives_list) <= 1)
+    )
+
+    if is_deflation:
+        game_mode = "Deflation (R31–R60, Fixed $20k)"
+    elif is_abr:
+        game_mode = "Alternate Bloons Rounds (ABR)"
+    elif is_chimps:
         game_mode = "CHIMPS / Impoppable"
     elif max_r == 80:
         game_mode = "Hard (80 Rounds)"
+    elif max_r == 70:
+        game_mode = "Odyssey / Custom (70 Rounds)"
     elif max_r == 60:
         game_mode = "Medium (60 Rounds)"
     elif max_r == 40:
@@ -55,17 +221,16 @@ def compute_btd6_scorecard(
     else:
         game_mode = "Standard"
 
-    total_spent = sum(abs(m.cash_delta) for m in valid if m.cash_delta <= -100)
-    total_earned = sum(m.cash_delta for m in valid if m.cash_delta > 0)
-    lives_lost = sum(abs(m.lives_delta) for m in valid if m.lives_delta < 0)
-    avg_cash = round(float(np.mean(cashes)), 1) if cashes else 0.0
-    peak_cash = max(cashes) if cashes else 0
+    no_income_mode = is_deflation or is_chimps
+    map_name = detect_map_name(title)
+    rules_note = mode_rules_summary(game_mode)
 
     towers_seen: list[str] = []
     for m in valid:
         if m.selected_tower and m.selected_tower not in towers_seen:
             towers_seen.append(m.selected_tower)
 
+    hero_used = next((t for t in towers_seen if t in HERO_NAMES), None)
     has_eco = any("eco" in TOWER_ROLES.get(t, ()) for t in towers_seen)
     purchase_events = [e for e in events if e.event_type == EventType.TOWER_PURCHASE]
     leak_events = [e for e in events if e.event_type == EventType.BLOON_LEAK]
@@ -85,11 +250,14 @@ def compute_btd6_scorecard(
     for le in leak_events:
         cash_str = f"${le.cash_at_event:,}" if le.cash_at_event is not None else "$?"
         r_info = KILLER_ROUNDS.get(le.round_num or -1)
+        threat_tags = r_info.threat_tags if r_info else ("early", "ceramic")
         fix = (
             r_info.wiki_advice
             if r_info
             else f"Spend your unspent cash ({cash_str}) on defense upgrades before this wave hits."
         )
+        root = _trace_preceding_spend_drought(purchase_events, le.round_num, le.timestamp_sec)
+        sol = _format_affordable_fix(threat_tags, le.cash_at_event)
         mistakes.append(
             MistakeItem(
                 category=f"Bloon Leak (Round {le.round_num or '?'})",
@@ -98,37 +266,77 @@ def compute_btd6_scorecard(
                 original_video_sec=max(0.0, round(le.original_video_sec - 1.5, 2)),
                 round_num=le.round_num,
                 summary=f"{le.visual_evidence} (Unspent cash at leak: {cash_str}).",
+                root_cause=root,
                 how_to_fix=fix,
+                affordable_solution=sol,
             )
         )
 
-    # 2. Cash Hoarding stretches (>= $2,500 unspent for >= 10s without spending)
-    hoard_run: list[FrameMetrics] = []
-    for m in valid:
-        if m.cash is not None and m.cash >= 2500:
-            hoard_run.append(m)
-        else:
-            if len(hoard_run) * step_sec >= 10.0:
-                dur = round(len(hoard_run) * step_sec, 1)
-                peak = max(f.cash or 0 for f in hoard_run)
-                r0 = hoard_run[0].round_num
-                mistakes.append(
-                    MistakeItem(
-                        category=f"Cash Hoarding (Round {r0 or '?'})",
-                        severity="medium",
-                        timestamp_sec=max(0.0, round(hoard_run[0].timestamp_sec - 0.5, 2)),
-                        original_video_sec=max(
-                            0.0, round(hoard_run[0].original_video_sec - 0.5, 2)
-                        ),
-                        round_num=r0,
-                        summary=f"Held ${peak:,} unspent cash for {dur:.0f}s.",
-                        how_to_fix=(
-                            "Unless saving for a specific Tier 4/5 upgrade, reinvest idle cash "
-                            "into Eco (Farms) or upcoming killer-round counters."
-                        ),
-                    )
+    # 2. Smart Cash Hoarding check:
+    #    - Disabled in Deflation (fixed $20k budget at R31, $0 income).
+    #    - Never penalize a deliberate Tier 4/5 save-up where the player spends >= 55% of
+    #      the saved peak immediately afterward with zero leaks!
+    if not is_deflation:
+        hoard_indices: list[int] = []
+
+        def _evaluate_hoard_stretch(indices: list[int]) -> None:
+            if len(indices) * step_sec < 14.0:
+                return
+            stretch = [valid[i] for i in indices]
+            dur = round(len(stretch) * step_sec, 1)
+            peak = max(f.cash or 0 for f in stretch)
+            t_start = stretch[0].timestamp_sec
+            t_end = stretch[-1].timestamp_sec
+            leaked_during = any(t_start <= le.timestamp_sec <= t_end + 3.0 for le in leak_events)
+
+            # Check if the player immediately converted this save-up into a big upgrade!
+            last_idx = indices[-1]
+            ahead_end = min(len(valid), last_idx + int(round(12.0 / step_sec)) + 2)
+            lookahead = valid[last_idx:ahead_end]
+            min_after = min((f.cash for f in lookahead if f.cash is not None), default=peak)
+            spent_after = max(0, peak - min_after)
+            if not leaked_during and spent_after >= int(peak * 0.55):
+                return  # Disciplined save-up for a Tier 4/5 upgrade — NOT cash hoarding!
+
+            r0 = stretch[0].round_num
+            upcoming = next(
+                (kr for r_k, kr in sorted(KILLER_ROUNDS.items()) if r0 is not None and r_k >= r0),
+                None,
+            )
+            u_tags = upcoming.threat_tags if upcoming else ("ceramic", "moab")
+            up_lbl = f"R{upcoming.round_num} ({upcoming.name})" if upcoming else "midgame waves"
+            fix_msg = (
+                "In CHIMPS, reinvest idle cash into key support/DPS before upcoming killer rounds."
+                if no_income_mode
+                else "Reinvest idle cash into Eco (Banana Farms) or upcoming killer-round counters."
+            )
+            mistakes.append(
+                MistakeItem(
+                    category=f"Unspent Cash Hoarding (Round {r0 or '?'})",
+                    severity="high" if leaked_during else "medium",
+                    timestamp_sec=max(0.0, round(t_start - 0.5, 2)),
+                    original_video_sec=max(0.0, round(stretch[0].original_video_sec - 0.5, 2)),
+                    round_num=r0,
+                    summary=(
+                        f"Held ${peak:,} unspent for {dur:.0f}s without converting it into "
+                        "a major upgrade."
+                    ),
+                    root_cause=(
+                        f"Idle bank peaked at ${peak:,} before {up_lbl} without a Tier 4/5 "
+                        "payoff purchase."
+                    ),
+                    how_to_fix=fix_msg,
+                    affordable_solution=_format_affordable_fix(u_tags, peak),
                 )
-            hoard_run = []
+            )
+
+        for idx_v, m in enumerate(valid):
+            if m.cash is not None and m.cash >= 3000:
+                hoard_indices.append(idx_v)
+            else:
+                _evaluate_hoard_stretch(hoard_indices)
+                hoard_indices = []
+        _evaluate_hoard_stretch(hoard_indices)
 
     # 3. Upcoming Killer Round Wiki Check (if we saw a killer round without a clear counter tower)
     observed_roles = {role for t in towers_seen for role in TOWER_ROLES.get(t, ())}
@@ -150,7 +358,12 @@ def compute_btd6_scorecard(
                             f"({', '.join(towers_seen[:4])}) didn't show explicit "
                             f"{'/'.join(missing)} counter panel."
                         ),
+                        root_cause=(
+                            f"Early/midgame build focused on {', '.join(towers_seen[:3])} without "
+                            f"dedicated {'/'.join(missing)} coverage before R{r}."
+                        ),
                         how_to_fix=info.wiki_advice,
+                        affordable_solution=_format_affordable_fix(info.threat_tags, first_m.cash),
                     )
                 )
 
@@ -189,6 +402,9 @@ def compute_btd6_scorecard(
     return BTD6Scorecard(
         overall_strategy_score=overall,
         game_mode=game_mode,
+        map_name=map_name,
+        hero_used=hero_used,
+        mode_rules_note=rules_note,
         start_round=start_round,
         end_round=end_round,
         rounds_progressed=rounds_progressed,

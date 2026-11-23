@@ -56,7 +56,7 @@ class DetectedEvent(BaseModel):
 
 
 class MistakeItem(BaseModel):
-    """One grouped, timestamped BTD6 strategy/economy mistake with Bloons Wiki advice."""
+    """One grouped, timestamped BTD6 mistake paired with root-cause investigation & Wiki fix."""
 
     category: str
     severity: str = "medium"  # "high" | "medium" | "low"
@@ -64,7 +64,9 @@ class MistakeItem(BaseModel):
     original_video_sec: float = Field(ge=0.0)
     round_num: int | None = None
     summary: str
+    root_cause: str = ""
     how_to_fix: str
+    affordable_solution: str = ""
 
 
 class BTD6Scorecard(BaseModel):
@@ -72,6 +74,10 @@ class BTD6Scorecard(BaseModel):
 
     overall_strategy_score: float = Field(default=0.0, ge=0.0, le=100.0)
     game_mode: str = "Standard"
+    map_name: str | None = None
+    hero_used: str | None = None
+    mode_rules_note: str = ""
+    outcome: str = "In Progress"  # "Victory" | "Defeat" | "In Progress"
     start_round: int | None = None
     end_round: int | None = None
     rounds_progressed: int = Field(default=0, ge=0)
@@ -83,7 +89,10 @@ class BTD6Scorecard(BaseModel):
     purchase_count: int = Field(default=0, ge=0)
     has_eco_farming: bool = False
     towers_observed: list[str] = Field(default_factory=list)
+    upgrades_detected: list[str] = Field(default_factory=list)
     killer_rounds_seen: list[str] = Field(default_factory=list)
+    early_game_summary: str = ""
+    root_cause_headline: str = ""
     mistakes: list[MistakeItem] = Field(default_factory=list)
     improvement_drills: list[str] = Field(default_factory=list)
 
@@ -99,6 +108,25 @@ class ClipSummary(BaseModel):
     avg_map_activity: float = Field(default=0.0, ge=0.0)
 
 
+class GameSession(BaseModel):
+    """One individual BTD6 match segmented out of a recording."""
+
+    game_index: int = Field(ge=1)
+    label: str
+    start_sec: float = Field(ge=0.0)
+    end_sec: float = Field(ge=0.0)
+    summary: ClipSummary
+    scorecard: BTD6Scorecard = Field(default_factory=BTD6Scorecard)
+    events: list[DetectedEvent] = Field(default_factory=list)
+    timeline: list[FrameMetrics] = Field(default_factory=list)
+    map_embedding: list[float] = Field(default_factory=list)
+    round_embeddings: dict[str, list[float]] = Field(default_factory=dict)
+    visual_matched_towers: int = 0
+    end_screen_detected: bool = False
+    map_thumbnail_path: str | None = None
+    vlm_tactical_summary: str | None = None
+
+
 class AnalysisReport(BaseModel):
     """Complete saved analysis report for one BTD6 gameplay recording."""
 
@@ -112,6 +140,7 @@ class AnalysisReport(BaseModel):
     scorecard: BTD6Scorecard = Field(default_factory=BTD6Scorecard)
     events: list[DetectedEvent] = Field(default_factory=list)
     timeline: list[FrameMetrics] = Field(default_factory=list)
+    games: list[GameSession] = Field(default_factory=list)
     vlm_model: str | None = None
     vlm_tactical_summary: str | None = None
     local_clip_path: str | None = None

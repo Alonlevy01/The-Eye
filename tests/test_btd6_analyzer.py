@@ -201,3 +201,120 @@ def test_visual_embeddings_map_match_and_unclicked_tower() -> None:
     )
     assert cmp_same["same_map_detected"] is True
     assert cmp_same["map_similarity"] >= 0.99
+
+
+def test_end_banner_and_upgrade_name_matchers() -> None:
+    from the_eye.btd6_wiki import match_upgrade_name
+    from the_eye.vision import parse_end_banner_texts
+
+    assert (
+        parse_end_banner_texts(["VIGTORY", "Congratulations!Youcompleted thistrackon:Hard"])
+        == "Victory"
+    )
+    assert parse_end_banner_texts(["DEFEAT", "TRY AGAIN"]) == "Defeat"
+    assert parse_end_banner_texts(["$1,200", "30/80"]) is None
+
+    assert match_upgrade_name("BLOONJITSU") == "Bloonjitsu (Ninja 4-x-x)"
+    assert match_upgrade_name("counTeR- ESPIoNAGe") == "Counter-Espionage (Ninja x-2-x)"
+    assert match_upgrade_name("Stronger Stimulant") == "Stronger Stimulant (Alch 4-x-x)"
+
+
+def test_multi_game_segmentation_separates_two_matches() -> None:
+    from the_eye.vision import segment_games
+
+    dummy = np.zeros((180, 320, 3), dtype=np.uint8)
+    # Game 1: R1 -> R60 (60-round Medium), then Game 2: R1 -> R63 (70-round Odyssey)
+    specs = [
+        (0.0, 1, 60, 150, 850),
+        (10.0, 2, 60, 150, 600),
+        (50.0, 40, 60, 120, 1800),
+        (60.0, 59, 60, 95, 2900),
+        (70.0, 60, 60, 95, 3200),
+        # New game starts on a second map!
+        (90.0, 1, 70, 150, 850),
+        (100.0, 2, 70, 150, 400),
+        (150.0, 62, 70, 150, 25000),
+        (160.0, 63, 70, 150, 26680),
+    ]
+    sampled = [
+        SampledFrame(
+            metrics=FrameMetrics(
+                frame_index=i,
+                timestamp_sec=ts,
+                original_video_sec=ts,
+                round_num=r,
+                max_round=mr,
+                lives=lv,
+                cash=c,
+            ),
+            bgr=dummy,
+        )
+        for i, (ts, r, mr, lv, c) in enumerate(specs)
+    ]
+
+    games = segment_games(sampled)
+    assert len(games) == 2
+    assert games[0][0].metrics.round_num == 1
+    assert games[0][-1].metrics.round_num == 60
+    assert games[1][0].metrics.round_num == 1
+    assert games[1][-1].metrics.round_num == 63
+    # Transition from Game 1 ($3200) to Game 2 ($850) must NOT create a fake negative cash_delta
+    assert games[1][0].metrics.cash_delta == 0
+    assert games[1][0].metrics.lives_delta == 0
+
+
+def test_root_cause_investigator_and_affordable_wiki_solutions() -> None:
+    from the_eye.btd6_wiki import recommend_affordable_counters
+    from the_eye.mechanics import build_early_game_and_root_cause
+
+    sols = recommend_affordable_counters(("ceramic",), available_cash=6000)
+    assert sols
+    assert all(s.approx_cost <= 6000 for s in sols)
+
+    tl = [
+        FrameMetrics(
+            frame_index=0, timestamp_sec=0.0, original_video_sec=0.0,
+            round_num=5, max_round=70, lives=150, cash=900, selected_tower="Obyn",
+        ),
+        FrameMetrics(
+            frame_index=1, timestamp_sec=20.0, original_video_sec=20.0,
+            round_num=51, max_round=70, lives=150, cash=4200, cash_delta=-1000,
+        ),
+        FrameMetrics(
+            frame_index=2, timestamp_sec=140.0, original_video_sec=140.0,
+            round_num=63, max_round=70, lives=150, cash=26680,
+        ),
+    ]
+    sc = compute_btd6_scorecard(tl, [], fps=1.0).model_copy(update={"outcome": "Defeat"})
+    early_sum, headline = build_early_game_and_root_cause(tl, [], sc)
+    assert "Obyn" in early_sum
+    assert "R63" in headline and "$26,680" in headline
+
+
+def test_deflation_and_deliberate_saveup_not_flagged_as_hoarding() -> None:
+    # 1. Deflation starts at R31 with $20,000 fixed cash -> must NOT flag Cash Hoarding
+    defl_tl = [
+        FrameMetrics(
+            frame_index=i, timestamp_sec=float(i * 2), original_video_sec=float(i * 2),
+            round_num=31 + (i // 3), max_round=60, lives=150, cash=20000 if i < 10 else 4200,
+        )
+        for i in range(20)
+    ]
+    sc_defl = compute_btd6_scorecard(defl_tl, [], fps=0.5, title="Deflation Mode on Logs")
+    assert "Deflation" in sc_defl.game_mode
+    assert sc_defl.map_name == "Logs"
+    assert not any("Hoarding" in mk.category for mk in sc_defl.mistakes)
+
+    # 2. Deliberate save-up ($5,000 saved for 20s then spent down to $400) -> NOT hoarding
+    save_tl = [
+        FrameMetrics(
+            frame_index=i, timestamp_sec=float(i * 2), original_video_sec=float(i * 2),
+            round_num=45, max_round=80, lives=100, cash=5000 if i < 12 else 400,
+            selected_tower="Obyn" if i == 0 else None,
+        )
+        for i in range(16)
+    ]
+    sc_save = compute_btd6_scorecard(save_tl, [], fps=0.5, title="Downstream [Hard]")
+    assert sc_save.hero_used == "Obyn"
+    assert sc_save.map_name == "Downstream"
+    assert not any("Hoarding" in mk.category for mk in sc_save.mistakes)

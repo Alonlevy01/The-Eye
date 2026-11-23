@@ -19,8 +19,10 @@ def detect_fused_events(
     fps: float = 2.0,
     keyframes_dir: Path | None = None,
     max_keyframes: int = 12,
+    event_prefix: str = "E",
+    title: str = "",
 ) -> tuple[list[DetectedEvent], ClipSummary, BTD6Scorecard]:
-    """Detect BTD6 leaks, tower upgrades/purchases, and wiki killer rounds with filmstrips."""
+    """Detect BTD6 leaks, tower purchases, and wiki killer rounds with prioritized filmstrips."""
     if not sampled_frames:
         empty_summary = ClipSummary(
             analyzed_duration_sec=0.0,
@@ -40,6 +42,7 @@ def detect_fused_events(
     cashes = [m.cash for m in timeline]
 
     events: list[DetectedEvent] = []
+    event_frame_indices: list[tuple[int, int]] = []  # (frame_idx, spend_amount)
     last_event_ts: dict[EventType, float] = {}
     seen_killer_rounds: set[int] = set()
     cooldowns: dict[EventType, float] = {
@@ -56,13 +59,13 @@ def detect_fused_events(
     if keyframes_dir is not None:
         keyframes_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_kf = 0
-
+    # Pass 1: detect all events across the entire game
     for idx, sf in enumerate(sampled_frames):
         m = sf.metrics
         etype: EventType | None = None
         confidence = 0.0
         visual_ev = ""
+        spend_amt = 0
         audio_ev = (
             f"Audio spike detected (RMS={m.audio_rms:.3f}, onset={m.audio_onset:.2f})."
             if m.audio_spike
@@ -96,38 +99,16 @@ def detect_fused_events(
         elif m.cash_delta <= -150 and _can_emit(EventType.TOWER_PURCHASE, m.timestamp_sec):
             etype = EventType.TOWER_PURCHASE
             confidence = 0.94
+            spend_amt = abs(m.cash_delta)
             t_lbl = f" ({m.selected_tower})" if m.selected_tower else ""
             visual_ev = (
-                f"Spent ${abs(m.cash_delta):,} on Round {m.round_num or '?'}{t_lbl} "
+                f"Spent ${spend_amt:,} on Round {m.round_num or '?'}{t_lbl} "
                 f"(Remaining cash: ${m.cash:,})."
             )
 
         if etype is not None:
             last_event_ts[etype] = m.timestamp_sec
-            event_id = f"E{len(events) + 1}"
-            kf_str: str | None = None
-            strip_str: str | None = None
-
-            if keyframes_dir is not None and saved_kf < max_keyframes:
-                annotated = annotate_frame(sf.bgr, m, event_label=f"{event_id} {etype.value}")
-                kf_file = keyframes_dir / f"{event_id}_{etype.value}_{m.timestamp_sec:.1f}s.png"
-                cv2.imwrite(str(kf_file), annotated)
-                kf_str = str(kf_file)
-
-                strip_file = keyframes_dir / f"{event_id}_filmstrip_{m.timestamp_sec:.1f}s.png"
-                build_moment_filmstrip(
-                    frames_bgr,
-                    timestamps,
-                    rounds,
-                    cashes,
-                    event_idx=idx,
-                    event_label=f"{event_id} {etype.value}",
-                    fps=fps,
-                    output_path=strip_file,
-                )
-                strip_str = str(strip_file)
-                saved_kf += 1
-
+            event_id = f"{event_prefix}{len(events) + 1}"
             events.append(
                 DetectedEvent(
                     event_id=event_id,
@@ -141,10 +122,50 @@ def detect_fused_events(
                     confidence=round(confidence, 2),
                     visual_evidence=visual_ev,
                     audio_evidence=audio_ev,
-                    keyframe_path=kf_str,
-                    filmstrip_path=strip_str,
                 )
             )
+            event_frame_indices.append((idx, spend_amt))
+
+    # Pass 2: render keyframes & 3-frame filmstrips for the highest-impact moments in this game
+    if keyframes_dir is not None and events:
+        def _priority_key(pos: int) -> tuple[int, int]:
+            ev = events[pos]
+            _, spend = event_frame_indices[pos]
+            if ev.event_type in (EventType.DEFEAT_OR_END, EventType.BLOON_LEAK):
+                return (0, -(ev.round_num or 0))
+            if ev.event_type == EventType.KILLER_ROUND:
+                return (1, -(ev.round_num or 0))
+            return (2, -spend)
+
+        chosen_positions = sorted(
+            sorted(range(len(events)), key=_priority_key)[:max_keyframes]
+        )
+        for pos in chosen_positions:
+            ev = events[pos]
+            f_idx, _ = event_frame_indices[pos]
+            sf = sampled_frames[f_idx]
+            annotated = annotate_frame(
+                sf.bgr,
+                sf.metrics,
+                event_label=f"{ev.event_id} {ev.event_type.value}",
+            )
+            kf_name = f"{ev.event_id}_{ev.event_type.value}_{ev.timestamp_sec:.1f}s.png"
+            kf_file = keyframes_dir / kf_name
+            cv2.imwrite(str(kf_file), annotated)
+            ev.keyframe_path = str(kf_file)
+
+            strip_file = keyframes_dir / f"{ev.event_id}_filmstrip_{ev.timestamp_sec:.1f}s.png"
+            build_moment_filmstrip(
+                frames_bgr,
+                timestamps,
+                rounds,
+                cashes,
+                event_idx=f_idx,
+                event_label=f"{ev.event_id} {ev.event_type.value}",
+                fps=fps,
+                output_path=strip_file,
+            )
+            ev.filmstrip_path = str(strip_file)
 
     total_duration = round(len(sampled_frames) * step_sec, 2)
     ocr_valid = sum(1 for m in timeline if m.cash is not None or m.round_num is not None)
@@ -159,5 +180,5 @@ def detect_fused_events(
         audio_spike_count=audio_spikes,
         avg_map_activity=round(float(np.mean(acts)), 2),
     )
-    scorecard = compute_btd6_scorecard(timeline, events, fps=fps)
+    scorecard = compute_btd6_scorecard(timeline, events, fps=fps, title=title)
     return events, summary, scorecard

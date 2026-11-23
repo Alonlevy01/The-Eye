@@ -10,12 +10,15 @@ from typing import Any
 import cv2
 import numpy as np
 
-from the_eye.btd6_wiki import match_tower_name
+from the_eye.btd6_wiki import match_tower_name, match_upgrade_name
 from the_eye.schemas import FrameMetrics, format_timestamp
 
 # Top HUD strip covering Lives, Cash ($), Round (X/Y), and open Upgrade Panel titles
 TOP_HUD_ROI = (0.0, 0.0, 0.85, 0.115)
 PLAYABLE_MAP_ROI = (0.02, 0.12, 0.82, 0.94)
+END_BANNER_ROI = (0.20, 0.08, 0.80, 0.58)
+LEFT_UPGRADE_PANEL_ROI = (0.0, 0.12, 0.28, 0.88)
+RIGHT_UPGRADE_PANEL_ROI = (0.58, 0.12, 0.86, 0.88)
 
 _OCR_INSTANCE: Any | None = None
 
@@ -226,7 +229,14 @@ def sample_video_frames(
     finally:
         cap.release()
 
-    # Post-process: enforce clean rounds & cash/lives deltas (ignoring non-HUD intro/menu frames)
+    return sampled
+
+
+def postprocess_game_frames(sampled: list[SampledFrame]) -> list[SampledFrame]:
+    """Clean rounds, cash deltas, and lives deltas for a SINGLE BTD6 game segment."""
+    if not sampled:
+        return []
+
     raw_lives = [
         sf.metrics.lives
         if (sf.metrics.cash is not None or sf.metrics.round_num is not None)
@@ -262,6 +272,18 @@ def sample_video_frames(
         else:
             smoothed_lives.append(lv)
 
+    # Reject short transient lives dips that bounce right back to the exact prior value
+    # (e.g. 95 -> 56 -> 95 within <= 4 frames caused by an overlay partially covering the heart)
+    cleaned_lives = list(smoothed_lives)
+    for idx in range(1, len(cleaned_lives) - 1):
+        cur = cleaned_lives[idx]
+        prev = cleaned_lives[idx - 1]
+        if cur is None or prev is None or cur >= prev:
+            continue
+        future = [cleaned_lives[j] for j in range(idx + 1, min(len(cleaned_lives), idx + 5))]
+        if any(f is not None and f >= prev - 2 for f in future):
+            cleaned_lives[idx] = prev
+
     last_round: int | None = None
     last_max_round: int | None = None
     last_cash: int | None = None
@@ -279,7 +301,7 @@ def sample_video_frames(
                 and (r < last_round or r > last_round + 5)
                 and not confirmed_jump
             ):
-                r = last_round  # reject single-frame OCR misread
+                r = last_round
             else:
                 last_round = r
         else:
@@ -290,7 +312,6 @@ def sample_video_frames(
         c = m.cash
         cash_delta = 0
         if c is not None:
-            # Reject extreme single-frame OCR digit drops/explosions (> $200k jump in 0.5s)
             if last_cash is not None and abs(c - last_cash) > 200_000:
                 c = last_cash
             elif last_cash is not None:
@@ -299,17 +320,16 @@ def sample_video_frames(
         else:
             c = last_cash
 
-        lv = smoothed_lives[idx]
+        lv = cleaned_lives[idx]
         lives_delta = 0
         if lv is not None:
-            next_lv = smoothed_lives[idx + 1] if idx + 1 < len(smoothed_lives) else None
+            next_lv = cleaned_lives[idx + 1] if idx + 1 < len(cleaned_lives) else None
             confirmed_lv = next_lv is not None and abs(next_lv - lv) <= 5
             if (
                 last_lives is not None
                 and (lv > last_lives + 25 or abs(lv - last_lives) > 500)
                 and not confirmed_lv
             ):
-                # Reject 1-frame upward lives spike (e.g. pop-count OCR misread)
                 lv = last_lives
             elif last_lives is not None:
                 lives_delta = lv - last_lives
@@ -329,6 +349,65 @@ def sample_video_frames(
         )
 
     return sampled
+
+
+def segment_games(sampled: list[SampledFrame]) -> list[list[SampledFrame]]:
+    """Split a multi-game BTD6 recording into individual games when round resets or mode changes."""
+    if not sampled:
+        return []
+
+    raw_rounds = [sf.metrics.round_num for sf in sampled]
+    split_indices: list[int] = [0]
+    peak_round = 0
+    current_max_round: int | None = None
+
+    for idx, sf in enumerate(sampled):
+        r = sf.metrics.round_num
+        mr = sf.metrics.max_round
+        if r is None:
+            continue
+
+        # Confirm round reading is real (not a 1-frame OCR glitch)
+        next_r = raw_rounds[idx + 1] if idx + 1 < len(raw_rounds) else r
+        prev_r = raw_rounds[idx - 1] if idx > 0 else r
+        confirmed = (next_r is not None and abs(next_r - r) <= 3) or (
+            prev_r is not None and abs(prev_r - r) <= 3
+        )
+        if not confirmed:
+            continue
+
+        round_reset = peak_round >= 12 and r <= max(10, peak_round - 10)
+        mode_changed = (
+            current_max_round is not None
+            and mr is not None
+            and mr != current_max_round
+            and peak_round >= 10
+            and r <= 15
+        )
+        if round_reset or mode_changed:
+            # Split cleanly right before this new game's first HUD frame
+            split_indices.append(idx)
+            peak_round = r
+            current_max_round = mr
+        else:
+            if r > peak_round:
+                peak_round = r
+            if mr is not None and current_max_round is None:
+                current_max_round = mr
+
+    split_indices.append(len(sampled))
+    games: list[list[SampledFrame]] = []
+    for s_idx, e_idx in zip(split_indices[:-1], split_indices[1:], strict=True):
+        chunk = sampled[s_idx:e_idx]
+        valid_hud = [
+            sf for sf in chunk if sf.metrics.round_num is not None or sf.metrics.cash is not None
+        ]
+        if len(valid_hud) >= 3:
+            games.append(postprocess_game_frames(chunk))
+
+    if not games:
+        return [postprocess_game_frames(sampled)]
+    return games
 
 
 def annotate_frame(
@@ -374,3 +453,91 @@ def annotate_frame(
         cv2.LINE_AA,
     )
     return out
+
+
+def parse_end_banner_texts(texts: list[str]) -> str | None:
+    """Classify BTD6 end-screen banner OCR text as 'Victory', 'Defeat', or None."""
+    joined = " ".join(texts).lower()
+    alpha = "".join(ch for ch in joined if ch.isalpha())
+    if any(tok in alpha for tok in ("victory", "vigtory", "congratulations", "completedthistrack")):
+        return "Victory"
+    if any(tok in alpha for tok in ("defeat", "gameover", "tryagain", "roundfailed")):
+        return "Defeat"
+    return None
+
+
+def detect_end_screen_outcome(
+    sampled_frames: list[SampledFrame],
+    *,
+    ocr_engine: Any | None = None,
+) -> tuple[str, float | None]:
+    """Scan the final 30 seconds of a BTD6 video for VICTORY or DEFEAT banners."""
+    if not sampled_frames:
+        return "In Progress", None
+
+    # Check explicit 0-lives defeat first
+    for sf in reversed(sampled_frames[-40:]):
+        if sf.metrics.lives == 0:
+            return "Defeat", sf.metrics.timestamp_sec
+
+    engine = ocr_engine or _get_ocr()
+    end_ts = sampled_frames[-1].metrics.timestamp_sec
+    tail_frames = [
+        sf for sf in sampled_frames if sf.metrics.timestamp_sec >= max(0.0, end_ts - 30.0)
+    ]
+    # Check every 2nd frame in tail (<= 15 OCR calls total)
+    for sf in reversed(tail_frames[::2]):
+        crop = _crop_norm(sf.bgr, END_BANNER_ROI)
+        res, _ = engine(crop)
+        texts = [str(entry[1]) for entry in (res or [])]
+        verdict = parse_end_banner_texts(texts)
+        if verdict is not None:
+            return verdict, sf.metrics.timestamp_sec
+
+    return "In Progress", None
+
+
+def extract_panel_upgrades(
+    sampled_frames: list[SampledFrame],
+    *,
+    max_checks: int = 24,
+    ocr_engine: Any | None = None,
+) -> list[str]:
+    """Read notable BTD6 upgrade names from open tower panels across the run."""
+    if not sampled_frames:
+        return []
+
+    # Pick frames where a tower panel is open (prioritize upgrade/purchase frames)
+    candidates = [
+        sf
+        for sf in sampled_frames
+        if sf.metrics.selected_tower is not None and sf.metrics.cash_delta <= -150
+    ]
+    if len(candidates) < 8:
+        extra = [sf for sf in sampled_frames if sf.metrics.selected_tower is not None]
+        step = max(1, len(extra) // max(1, max_checks))
+        candidates = extra[::step]
+
+    candidates = candidates[:max_checks]
+    if not candidates:
+        return []
+
+    engine = ocr_engine or _get_ocr()
+    found: list[str] = []
+    for sf in candidates:
+        for roi in (LEFT_UPGRADE_PANEL_ROI, RIGHT_UPGRADE_PANEL_ROI):
+            crop = _crop_norm(sf.bgr, roi)
+            res, _ = engine(crop)
+            if not res:
+                continue
+            texts = [str(entry[1]) for entry in res]
+            # Check single tokens & adjacent pairs (2-line titles like Counter-Espionage)
+            for idx, txt in enumerate(texts):
+                cand_strs = [txt]
+                if idx + 1 < len(texts):
+                    cand_strs.append(f"{txt} {texts[idx + 1]}")
+                for s in cand_strs:
+                    matched = match_upgrade_name(s)
+                    if matched and matched not in found:
+                        found.append(matched)
+    return found
