@@ -474,3 +474,146 @@ def recommend_affordable_counters(
             return affordable[:limit]
     matches.sort(key=lambda c: (-len(tags & set(c.threat_tags)), c.approx_cost))
     return matches[:limit]
+
+
+# Complete compact Bloons TD 6 Wiki upgrade-path cheat sheet (all 24 towers: Top, Mid, Bot)
+COMPACT_WIKI_TOWER_PATHS: dict[str, tuple[str, str, str]] = {
+    "Dart Monkey": (
+        "Juggernaut/Ultra-Juggernaut",
+        "Super/Plasma Monkey Fan Club",
+        "Crossbow/Sharp Shooter/Crossbow Master",
+    ),
+    "Boomerang Monkey": (
+        "M.O.A.R. Glaives/Glaive Lord",
+        "Turbo/Perma Charge",
+        "MOAB Press/MOAB Domination",
+    ),
+    "Bomb Shooter": (
+        "Bloon Impact/Bloon Crush",
+        "MOAB Mauler/Assassin/Eliminator",
+        "Cluster/Recursive Cluster/Bomb Blitz",
+    ),
+    "Tack Shooter": (
+        "Ring of Fire/Inferno Ring",
+        "Blade/Super Maelstrom",
+        "Overdrive/The Tack Zone",
+    ),
+    "Ice Monkey": (
+        "Embrittlement/Super Brittle",
+        "Snowstorm/Absolute Zero",
+        "Cryo Cannon/Icicles/Icicle Impale",
+    ),
+    "Glue Gunner": (
+        "Bloon Dissolver/Liquefier/Solver",
+        "Glue Hose/Glue Storm",
+        "MOAB Glue/Relentless/Super Glue",
+    ),
+    "Sniper Monkey": (
+        "Deadly Precision/Maim/Cripple MOAB",
+        "Bouncing Bullet/Supply Drop/Elite Sniper",
+        "Full Auto Rifle/Elite Defender",
+    ),
+    "Monkey Sub": (
+        "Submerge & Support/Reactor/Energizer",
+        "Ballistic Missile/First Strike",
+        "Armor Piercing Darts/Sub Commander",
+    ),
+    "Monkey Buccaneer": (
+        "Destroyer/Aircraft Carrier/Flagship",
+        "Cannon Ship/Monkey Pirates/Pirate Lord",
+        "Merchantmen/Favored Trades",
+    ),
+    "Monkey Ace": (
+        "Fighter Plane/Dart Storm/Sky Shredder",
+        "Bomber Ace/Ground Zero/Tsar Bomba",
+        "Neva-Miss/Spectre/Flying Fortress",
+    ),
+    "Heli Pilot": (
+        "Razor Rotors/Apache Dartship/Prime",
+        "Downdraft/Support Chinook",
+        "MOAB Shove/Comanche Defense/Commander",
+    ),
+    "Mortar Monkey": (
+        "The Big One/The Biggest One",
+        "Artillery Battery/Pop and Awe",
+        "Signal Flare/Shattering Shells/Blooncineration",
+    ),
+    "Dartling Gunner": (
+        "Laser Cannon/Plasma Accelerator/Ray of Doom",
+        "Hydra Rocket Pods/Rocket Storm/M.A.D",
+        "Buckshot/BADS/BEZ",
+    ),
+    "Wizard Monkey": (
+        "Arcane Mastery/Arcane Spike/Archmage",
+        "Dragon's Breath/Phoenix/Wizard Lord Phoenix",
+        "Shimmer/Necromancer/Prince of Darkness",
+    ),
+    "Super Monkey": (
+        "Sun Avatar/Sun Temple",
+        "Robo Monkey/Tech Terror",
+        "Dark Knight/Dark Champion",
+    ),
+    "Ninja Monkey": (
+        "Double Shot/Bloonjitsu/Grandmaster Ninja",
+        "Counter-Espionage/Shinobi/Bloon Sabotage",
+        "Flash Bomb/Sticky Bomb/Master Bomber",
+    ),
+    "Alchemist": (
+        "Acidic Mixture/Berserker Brew/Stronger Stimulant",
+        "Unstable Concoction/Transforming Tonic",
+        "Lead to Gold/Rubber to Gold/BMA",
+    ),
+    "Druid": (
+        "Druid of the Storm/Ball Lightning/Superstorm",
+        "Druid of the Jungle/Spirit of the Forest",
+        "Poplust/Avatar of Wrath",
+    ),
+    "Mermonkey": (
+        "Abyssal Warrior/Lord of the Abyss",
+        "Arctic Knight/Popseidon",
+        "Symphonic Resonance/The Final Harmonic",
+    ),
+    "Banana Farm": (
+        "Banana Plantation/Research Facility/Central",
+        "Monkey Bank/IMF Loan/Monkey-Nomics",
+        "Marketplace/Central Market/Wall Street",
+    ),
+    "Spike Factory": (
+        "Spiked Balls/Spiked Mines/Super Mines",
+        "MOAB SHREDR/Spike Storm/Carpet of Spikes",
+        "Deadly Spikes/Perma-Spike",
+    ),
+    "Monkey Village": (
+        "Jungle Drums/Primary Training/Mentoring",
+        "Radar Scanner/MIB (x-3-x)/Call to Arms/Homeland",
+        "Monkey Town/Monkey City",
+    ),
+    "Engineer Monkey": (
+        "Sprockets/Sentry Expert/Sentry Champion",
+        "Cleansing Foam/Overclock/Ultraboost",
+        "Bloon Trap/XXXL Trap",
+    ),
+    "Beast Handler": (
+        "Orca/Megalodon",
+        "T-Rex/Giganotosaurus",
+        "Giant Condor/Pouakai",
+    ),
+}
+
+
+def build_compact_wiki_reference(game_mode: str = "Standard") -> str:
+    """Build a compact (~1k-token) complete BTD6 Wiki cheat sheet to ground LLM coaching."""
+    low = game_mode.lower()
+    no_farm = "chimps" in low or "deflation" in low
+    lines = ["BLOONS TD 6 WIKI REFERENCE (ALL REAL UPGRADE PATHS — DO NOT INVENT NAMES):"]
+    for tower, (top_p, mid_p, bot_p) in COMPACT_WIKI_TOWER_PATHS.items():
+        if no_farm and tower == "Banana Farm":
+            continue
+        lines.append(f"- {tower}: Top={top_p} | Mid={mid_p} | Bot={bot_p}")
+    lines.append("PROVEN COUNTERS & APPROX COSTS:")
+    for sol in WIKI_COUNTERS:
+        lines.append(
+            f"- {sol.tower_path} ({sol.upgrade_name}, ~${sol.approx_cost:,}) "
+            f"[{','.join(sol.threat_tags)}]: {sol.why_it_works}"
+        )
+    return "\n".join(lines)

@@ -318,3 +318,30 @@ def test_deflation_and_deliberate_saveup_not_flagged_as_hoarding() -> None:
     assert sc_save.hero_used == "Obyn"
     assert sc_save.map_name == "Downstream"
     assert not any("Hoarding" in mk.category for mk in sc_save.mistakes)
+
+
+def test_compact_wiki_reference_grounds_vlm_prompt() -> None:
+    from the_eye.btd6_wiki import build_compact_wiki_reference
+    from the_eye.vlm import build_vlm_messages
+
+    ref_std = build_compact_wiki_reference("Hard (80 Rounds)")
+    assert "Crossbow Master" in ref_std
+    assert "Recursive Cluster" in ref_std
+    assert "Banana Farm" in ref_std
+    assert len(ref_std) < 6000  # compact (~1k tokens for all 24 towers + counters)
+
+    ref_chimps = build_compact_wiki_reference("CHIMPS / Impoppable")
+    assert "Banana Farm" not in ref_chimps
+
+    msgs = build_vlm_messages(
+        title="Test",
+        summary=ClipSummary(
+            analyzed_duration_sec=10.0, total_frames=10, ocr_valid_frames=10,
+            total_events=0, audio_spike_count=0,
+        ),
+        events=[],
+        scorecard=compute_btd6_scorecard([], []),
+    )
+    user_text = msgs[1]["content"][0]["text"]
+    assert "BLOONS TD 6 WIKI REFERENCE" in user_text
+    assert "MOAB Mauler" in user_text

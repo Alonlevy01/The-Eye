@@ -11,12 +11,13 @@ from typing import Any
 import cv2
 import httpx
 
+from the_eye.btd6_wiki import build_compact_wiki_reference
 from the_eye.config import Settings
 from the_eye.schemas import BTD6Scorecard, ClipSummary, DetectedEvent, format_timestamp
 
 VLM_SYSTEM_PROMPT = """You are a veteran Bloons TD 6 (BTD6) coach reviewing 3-frame
 gameplay filmstrips paired with HUD-verified Game Mode, Map, Hero, Round, Cash ($), Lives,
-Observed Towers, Upgrades, and Early-Game Audit.
+Observed Towers, Upgrades, Early-Game Audit, and the COMPLETE Bloons TD 6 Wiki Reference.
 
 Return STRICT JSON ONLY (no markdown fences, no extra prose):
 {
@@ -25,14 +26,16 @@ Return STRICT JSON ONLY (no markdown fences, no extra prose):
     "E2": "..."
   },
   "tactical_summary": "3-4 concise, mode-aware BTD6 coaching takeaways connecting early-game
-   choices to the final outcome and giving concrete upgrade solutions."
+   choices to the final outcome and recommending real BTD6 towers/upgrades."
 }
 
 RULES:
-1. RESPECT THE GAME MODE RULES: never suggest Banana Farms or income in CHIMPS or Deflation;
+1. NEVER INVENT UPGRADE OR TOWER NAMES (e.g. 'Dart Monkey MOAB Killer' does not exist).
+   ONLY use exact tower and upgrade names listed in the BLOONS WIKI REFERENCE below.
+2. RESPECT THE GAME MODE RULES: never suggest Banana Farms or income in CHIMPS or Deflation;
    never criticize Deflation R31 starting cash as hoarding; adapt to Alternate Bloons Rounds.
-2. Reference ONLY towers, heroes, upgrades, and HUD numbers actually visible in the frames or stats.
-3. Explain WHY the player won, leaked, or lost, and name specific BTD6 upgrade paths to improve."""
+3. You may recommend ANY real tower/upgrade from the Wiki Reference as an alternate winning
+   strategy, citing its real path (e.g. 2-0-4 Bomb Shooter Recursive Cluster) and cost."""
 
 
 def encode_image_base64_jpeg(image_path: Path, *, max_width: int = 960) -> str:
@@ -103,6 +106,13 @@ def build_vlm_messages(
             meta_lines.append(f"Early-Game Audit: {scorecard.early_game_summary}")
         if scorecard.root_cause_headline:
             meta_lines.append(f"Investigation Verdict: {scorecard.root_cause_headline}")
+
+    wiki_ref = build_compact_wiki_reference(
+        scorecard.game_mode if scorecard is not None else "Standard"
+    )
+    meta_lines.append("")
+    meta_lines.append(wiki_ref)
+    meta_lines.append("")
 
     meta_lines.append("Selected BTD6 moments to review:")
     for e, _ in chosen:
