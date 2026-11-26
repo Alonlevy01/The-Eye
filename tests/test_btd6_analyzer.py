@@ -345,3 +345,11 @@ def test_compact_wiki_reference_grounds_vlm_prompt() -> None:
     user_text = msgs[1]["content"][0]["text"]
     assert "BLOONS TD 6 WIKI REFERENCE" in user_text
     assert "MOAB Mauler" in user_text
+
+
+def test_the_eye_settings_env_override(monkeypatch: object) -> None:
+    from the_eye.config import Settings
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-envtest1234567890")
+    cfg = Settings(_env_file=None)
+    assert cfg.openrouter_api_key.get_secret_value() == "sk-or-v1-envtest1234567890"

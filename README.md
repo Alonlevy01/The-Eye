@@ -43,7 +43,7 @@ flowchart LR
 
 ### Prerequisites
 - Python `3.12+`, [`uv`](https://docs.astral.sh/uv/), and `ffmpeg` on `PATH`
-- Optional: [Ollama](https://ollama.com/) (`ollama pull qwen3.5:9b`) or `OPENROUTER_API_KEY` in `.env` for VLM coaching; optional `GEMINI_API_KEY` for `gemini-embedding-2-preview` (defaults to local ONNX `fastembed` with zero API key).
+- Optional: [Ollama](https://ollama.com/) (`ollama pull qwen3.5:9b`) or `OPENROUTER_API_KEY` (loaded automatically from `.env` **or** OS Keyring — Windows Credential Manager / macOS Keychain — under `the-eye/openrouter`, `key:openrouter`, or `OPENROUTER_API_KEY`); optional `GEMINI_API_KEY` for `gemini-embedding-2-preview` (defaults to local ONNX `fastembed` with zero API key).
 
 ### Install
 ```bash
